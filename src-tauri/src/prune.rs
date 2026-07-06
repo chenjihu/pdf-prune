@@ -60,55 +60,6 @@ fn name_eq(obj: &Object, expected: &[u8]) -> bool {
     false
 }
 
-fn collect_reachable_objects(doc: &Document, start: ObjectId, visited: &mut HashSet<ObjectId>) {
-    if visited.contains(&start) {
-        return;
-    }
-    visited.insert(start);
-
-    if let Ok(obj) = doc.get_object(start) {
-        collect_refs_from_object(doc, obj, visited);
-    }
-}
-
-fn collect_refs_from_object(doc: &Document, obj: &Object, visited: &mut HashSet<ObjectId>) {
-    match obj {
-        Object::Dictionary(dict) => {
-            for (_, value) in dict.iter() {
-                collect_refs_from_object(doc, value, visited);
-            }
-        }
-        Object::Array(arr) => {
-            for item in arr {
-                collect_refs_from_object(doc, item, visited);
-            }
-        }
-        Object::Reference(id) => {
-            collect_reachable_objects(doc, *id, visited);
-        }
-        Object::Stream(stream) => {
-            for (_, value) in stream.dict.iter() {
-                collect_refs_from_object(doc, value, visited);
-            }
-        }
-        _ => {}
-    }
-}
-
-fn find_all_reachable(doc: &Document) -> HashSet<ObjectId> {
-    let mut visited = HashSet::new();
-
-    if let Ok(catalog_id) = doc.trailer.get(b"Root").and_then(Object::as_reference) {
-        collect_reachable_objects(doc, catalog_id, &mut visited);
-    }
-
-    if let Ok(info_id) = doc.trailer.get(b"Info").and_then(Object::as_reference) {
-        collect_reachable_objects(doc, info_id, &mut visited);
-    }
-
-    visited
-}
-
 fn compress_stream_data(data: &[u8]) -> Vec<u8> {
     let mut encoder = ZlibEncoder::new(Vec::new(), Compression::default());
     encoder.write_all(data).unwrap();

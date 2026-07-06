@@ -277,17 +277,6 @@ fn get_xobject_dict<'a>(doc: &'a Document, page_id: ObjectId) -> Option<&'a Dict
 }
 
 
-fn resolve_xobject<'a>(doc: &'a Document, xobject_dict: &Dictionary, name: &[u8]) -> Option<(ObjectId, &'a Stream)> {
-    if let Ok(obj) = xobject_dict.get(name) {
-        if let Object::Reference(id) = obj {
-            if let Ok(Object::Stream(stream)) = doc.get_object(*id) {
-                return Some((*id, stream));
-            }
-        }
-    }
-    None
-}
-
 fn is_image_stream(stream: &Stream) -> bool {
     stream.dict.get(b"Subtype")
         .map(|v| {

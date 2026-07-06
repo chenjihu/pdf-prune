@@ -324,7 +324,7 @@ fn analyze_with_qpdf(
     }
 
     // Second pass: identify font programs from FontDescriptor references
-    for (oid, dict) in &object_dicts {
+    for (_oid, dict) in &object_dicts {
         let typ = qpdf_dict_get_str(dict, "/Type").unwrap_or_default();
         if typ == "/FontDescriptor" {
             for key in ["/FontFile", "/FontFile2", "/FontFile3"] {
