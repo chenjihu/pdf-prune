@@ -1,8 +1,10 @@
 mod analysis;
+mod compress_images;
 mod prune;
 mod remove_images;
 
 use analysis::PdfAnalysis;
+use compress_images::{CompressedImageEntry, CompressImagesResult, ExtractedImageInfo};
 use prune::{PruneOptions, PruneResult};
 use remove_images::{RemoveImagesResult, ImageInfo, ImageSize};
 use std::sync::atomic::AtomicBool;
@@ -116,13 +118,72 @@ async fn list_images(
     result
 }
 
+#[tauri::command]
+async fn extract_images(
+    app: AppHandle,
+    input_path: String,
+) -> Result<Vec<ExtractedImageInfo>, String> {
+    let cancel = Arc::new(AtomicBool::new(false));
+    let progress_app = app.clone();
+
+    let result = tauri::async_runtime::spawn_blocking(move || {
+        compress_images::extract_images(
+            &input_path,
+            |pct, msg| {
+                let _ = progress_app.emit("extract-images-progress", (pct, msg));
+            },
+            cancel,
+        )
+    })
+    .await
+    .map_err(|e| format!("提取图片任务执行失败: {}", e))?;
+
+    let _ = app.emit("extract-images-progress", (100u8, "完成"));
+    result
+}
+
+#[tauri::command]
+async fn write_compressed_images(
+    app: AppHandle,
+    input_path: String,
+    output_path: String,
+    compressed_images: Vec<CompressedImageEntry>,
+) -> Result<CompressImagesResult, String> {
+    let cancel = Arc::new(AtomicBool::new(false));
+    let progress_app = app.clone();
+
+    let result = tauri::async_runtime::spawn_blocking(move || {
+        compress_images::write_compressed_images(
+            &input_path,
+            &output_path,
+            compressed_images,
+            |pct, msg| {
+                let _ = progress_app.emit("compress-images-progress", (pct, msg));
+            },
+            cancel,
+        )
+    })
+    .await
+    .map_err(|e| format!("压缩图片任务执行失败: {}", e))?;
+
+    let _ = app.emit("compress-images-progress", (100u8, "完成"));
+    result
+}
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     tauri::Builder::default()
         .plugin(tauri_plugin_opener::init())
         .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_fs::init())
-        .invoke_handler(tauri::generate_handler![analyze_pdf, prune_pdf, remove_images, list_images])
+        .invoke_handler(tauri::generate_handler![
+            analyze_pdf,
+            prune_pdf,
+            remove_images,
+            list_images,
+            extract_images,
+            write_compressed_images
+        ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
 }

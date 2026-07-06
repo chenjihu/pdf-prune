@@ -30,4 +30,17 @@ export default defineConfig(async () => ({
       ignored: ["**/src-tauri/**"],
     },
   },
+
+  // jsquash Emscripten modules use `new URL(..., import.meta.url)` to locate
+  // their .wasm files. Vite's dep pre-bundling rewrites import.meta.url to
+  // point at node_modules/.vite/deps/, which breaks WASM loading. Excluding
+  // these packages keeps import.meta.url pointing at the real source files.
+  optimizeDeps: {
+    exclude: [
+      "@jsquash/jpeg",
+      "@jsquash/png",
+      "@jsquash/webp",
+      "@jsquash/oxipng",
+    ],
+  },
 }));

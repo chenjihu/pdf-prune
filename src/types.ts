@@ -110,3 +110,45 @@ export interface ImageInfo {
   mediabox: number[];
   raw_ops: string[];
 }
+
+export interface ExtractedImageInfo {
+  id: string;
+  page: number;
+  name: string;
+  object_id: string;
+  width: number;
+  height: number;
+  file_size: number;
+  format: string;
+  color_space: string;
+  bits_per_component: number;
+  temp_path: string;
+  preview_path: string;
+  supported: boolean;
+}
+
+export interface CompressedImageEntry {
+  object_id: string;
+  temp_path: string;
+  format: string;
+  width: number;
+  height: number;
+}
+
+export interface CompressImagesResult {
+  output_path: string;
+  original_size: number;
+  output_size: number;
+  images_compressed: number;
+  actions: string[];
+}
+
+export interface CompressedImagePreview {
+  object_id: string;
+  original_size: number;
+  compressed_size: number;
+  compressed_preview_path: string;
+  format: string;
+  width: number;
+  height: number;
+}

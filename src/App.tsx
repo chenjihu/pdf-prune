@@ -15,14 +15,16 @@ import {
   Download,
   RotateCcw,
   ImageMinus,
+  Images,
   Plus,
   X,
 } from "lucide-react";
-import type { PdfAnalysis, PruneOptions, PruneResult, RemoveImagesResult, ImageInfo, ImageSize } from "./types";
+import type { PdfAnalysis, PruneOptions, PruneResult, RemoveImagesResult, ImageInfo, ImageSize, ExtractedImageInfo } from "./types";
 import { DEFAULT_PRUNE_OPTIONS, PRUNE_OPTION_LABELS } from "./types";
 import { formatSize, formatPercent, getComponentColor, formatDuration } from "./utils";
+import { CompressImagesTab } from "./components/CompressImagesTab";
 
-type Tab = "prune" | "removeImages";
+type Tab = "prune" | "removeImages" | "compressImages";
 
 function App() {
   const [tab, setTab] = useState<Tab>("prune");
@@ -47,6 +49,12 @@ function App() {
   const [yMax, setYMax] = useState(9999);
   const [scanning, setScanning] = useState(false);
   const [scanResults, setScanResults] = useState<ImageInfo[] | null>(null);
+
+  // Compress images state
+  const [extracting, setExtracting] = useState(false);
+  const [extractError, setExtractError] = useState<string | null>(null);
+  const [extractedImages, setExtractedImages] = useState<ExtractedImageInfo[] | null>(null);
+  const [compressInputPath, setCompressInputPath] = useState<string | null>(null);
 
   const openPdf = useCallback(async () => {
     try {
@@ -153,6 +161,42 @@ function App() {
     setScanResults(null);
   }, []);
 
+  const handleExtractImages = useCallback(async () => {
+    try {
+      const selected = await open({
+        filters: [{ name: "PDF 文件", extensions: ["pdf"] }],
+      });
+      if (!selected) return;
+
+      setExtracting(true);
+      setExtractError(null);
+      setExtractedImages(null);
+      setCompressInputPath(selected);
+      setStartTime(Date.now());
+      setEndTime(null);
+
+      const result = await invoke<ExtractedImageInfo[]>("extract_images", {
+        inputPath: selected,
+      });
+      setExtractedImages(result);
+      setEndTime(Date.now());
+    } catch (e) {
+      setExtractError(String(e));
+      setEndTime(Date.now());
+    } finally {
+      setExtracting(false);
+    }
+  }, []);
+
+  const resetCompressImages = useCallback(() => {
+    setExtractedImages(null);
+    setExtractError(null);
+    setCompressInputPath(null);
+    setStartTime(null);
+    setEndTime(null);
+    setElapsedTime(0);
+  }, []);
+
   const handleScanImages = useCallback(async () => {
     try {
       const selected = await open({
@@ -180,7 +224,7 @@ function App() {
 
   // Timer effect: updates elapsed time every second while a task is running
   useEffect(() => {
-    const isRunning = loading || pruning || removingImages || scanning;
+    const isRunning = loading || pruning || removingImages || scanning || extracting;
     if (!isRunning) {
       return;
     }
@@ -190,7 +234,7 @@ function App() {
       }
     }, 1000);
     return () => clearInterval(interval);
-  }, [loading, pruning, removingImages, scanning, startTime]);
+  }, [loading, pruning, removingImages, scanning, extracting, startTime]);
 
   // Listen for progress events
   useEffect(() => {
@@ -270,6 +314,15 @@ function App() {
             >
               <ImageMinus className="w-4 h-4" />
               移除图片
+            </button>
+            <button
+              onClick={() => setTab("compressImages")}
+              className={`flex items-center gap-2 px-3 py-1.5 text-sm rounded-lg transition-colors ${
+                tab === "compressImages" ? "bg-neutral-700 text-white" : "text-neutral-400 hover:text-neutral-200"
+              }`}
+            >
+              <Images className="w-4 h-4" />
+              压缩图片
             </button>
           </div>
         </div>
@@ -656,6 +709,21 @@ function App() {
           </div>
         )}
           </>
+        )}
+
+        {/* ===== Tab: Compress Images ===== */}
+        {tab === "compressImages" && (
+          <CompressImagesTab
+            extracting={extracting}
+            extractError={extractError}
+            extractedImages={extractedImages}
+            inputPath={compressInputPath}
+            onExtract={handleExtractImages}
+            onReset={resetCompressImages}
+            elapsedTime={elapsedTime}
+            startTime={startTime}
+            endTime={endTime}
+          />
         )}
 
         {/* ===== Tab: Remove Images ===== */}
