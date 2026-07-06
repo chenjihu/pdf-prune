@@ -9,6 +9,7 @@ export interface CompressOptions {
   format: CompressFormat;
   quality: number; // 1-100 for jpeg/webp
   scale: number; // 0.1-1.0
+  maxWidth?: number; // images wider than this are resized proportionally
 }
 
 export interface CompressResult {
@@ -64,6 +65,35 @@ function scaleImageData(
   return ctx.getImageData(0, 0, dstWidth, dstHeight);
 }
 
+function resizeImageDataToMaxWidth(
+  imageData: ImageData,
+  maxWidth: number,
+): ImageData {
+  const srcWidth = imageData.width;
+  const srcHeight = imageData.height;
+  const dstWidth = Math.max(1, Math.min(srcWidth, Math.round(maxWidth)));
+  if (dstWidth === srcWidth) return imageData;
+
+  const scale = dstWidth / srcWidth;
+  const dstHeight = Math.max(1, Math.round(srcHeight * scale));
+
+  const canvas = document.createElement("canvas");
+  canvas.width = dstWidth;
+  canvas.height = dstHeight;
+  const ctx = canvas.getContext("2d")!;
+  ctx.imageSmoothingEnabled = true;
+  ctx.imageSmoothingQuality = "high";
+
+  const tempCanvas = document.createElement("canvas");
+  tempCanvas.width = srcWidth;
+  tempCanvas.height = srcHeight;
+  const tempCtx = tempCanvas.getContext("2d")!;
+  tempCtx.putImageData(imageData, 0, 0);
+
+  ctx.drawImage(tempCanvas, 0, 0, srcWidth, srcHeight, 0, 0, dstWidth, dstHeight);
+  return ctx.getImageData(0, 0, dstWidth, dstHeight);
+}
+
 export async function compressImage(
   imageDataBuffer: ArrayBuffer,
   sourceFormat: string,
@@ -74,8 +104,9 @@ export async function compressImage(
   // Decode source image to ImageData
   let imageData = await loadImageDataFromArrayBuffer(imageDataBuffer, sourceFormat);
 
-  // Apply scaling
-  if (options.scale < 1.0) {
+  if (options.maxWidth && options.maxWidth > 0) {
+    imageData = resizeImageDataToMaxWidth(imageData, options.maxWidth);
+  } else if (options.scale < 1.0) {
     imageData = scaleImageData(imageData, options.scale);
   }
 

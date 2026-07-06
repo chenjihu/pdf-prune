@@ -8,6 +8,7 @@ import {
   CheckCircle2,
   AlertCircle,
   Maximize2,
+  CircleHelp,
 } from "lucide-react";
 import type { ExtractedImageInfo, CompressedImagePreview } from "../types";
 import {
@@ -18,6 +19,29 @@ import {
 } from "../lib/imageCompress";
 import { ImageCompare } from "./ImageCompare";
 
+const RAW_FORMAT_HELP =
+  "raw 表示这张图是 PDF 内部的原始图像数据或特殊编码流，不是可直接保存的 JPEG/PNG/WebP。它通常需要结合宽高、颜色空间、位深和 DecodeParms 才能还原，部分 raw 图片可能无法压缩。";
+
+function ImageFormatBadge({ format }: { format: string }) {
+  if (format !== "raw") {
+    return <span>{format.toUpperCase()}</span>;
+  }
+
+  return (
+    <span className="relative group inline-flex items-center gap-1">
+      RAW
+      <CircleHelp
+        className="w-3.5 h-3.5 text-neutral-500"
+        aria-label={RAW_FORMAT_HELP}
+        tabIndex={0}
+      />
+      <span className="pointer-events-none absolute left-0 top-full z-20 mt-2 hidden w-72 rounded-lg border border-neutral-700 bg-neutral-950 p-3 text-left text-xs leading-relaxed text-neutral-300 shadow-xl group-hover:block group-focus-within:block">
+        {RAW_FORMAT_HELP}
+      </span>
+    </span>
+  );
+}
+
 interface ImageDetailModalProps {
   image: ExtractedImageInfo;
   preview: CompressedImagePreview | null;
@@ -26,6 +50,7 @@ interface ImageDetailModalProps {
   defaultFormat: CompressFormat;
   defaultQuality: number;
   defaultScale: number;
+  defaultMaxWidth: number;
 }
 
 export function ImageDetailModal({
@@ -36,10 +61,12 @@ export function ImageDetailModal({
   defaultFormat,
   defaultQuality,
   defaultScale,
+  defaultMaxWidth,
 }: ImageDetailModalProps) {
   const [format, setFormat] = useState<CompressFormat>(defaultFormat);
   const [quality, setQuality] = useState(defaultQuality);
   const [scale, setScale] = useState(defaultScale);
+  const [maxWidth, setMaxWidth] = useState(defaultMaxWidth);
   const [compressing, setCompressing] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [fullscreen, setFullscreen] = useState(false);
@@ -70,6 +97,7 @@ export function ImageDetailModal({
         format,
         quality,
         scale: scale / 100,
+        maxWidth: maxWidth > 0 ? maxWidth : undefined,
       });
 
       const compressedPath = image.temp_path.replace(
@@ -95,7 +123,7 @@ export function ImageDetailModal({
     } finally {
       setCompressing(false);
     }
-  }, [image, format, quality, scale, onCompressed]);
+  }, [image, format, quality, scale, maxWidth, onCompressed]);
 
   return (
     <>
@@ -135,7 +163,7 @@ export function ImageDetailModal({
                 {image.name}
               </h3>
               <span className="text-xs text-neutral-500 flex-shrink-0">
-                第 {image.page} 页 · {image.format.toUpperCase()} ·{" "}
+                第 {image.page} 页 · <ImageFormatBadge format={image.format} /> ·{" "}
                 {image.width}×{image.height}
               </span>
             </div>
@@ -203,7 +231,7 @@ export function ImageDetailModal({
                   )}
                 </div>
 
-                <div className="grid grid-cols-2 md:grid-cols-3 gap-4">
+                <div className="grid grid-cols-2 md:grid-cols-4 gap-4">
                   {/* Format */}
                   <div>
                     <label className="text-xs text-neutral-500 mb-1 block">
@@ -242,7 +270,7 @@ export function ImageDetailModal({
                   {/* Scale */}
                   <div>
                     <label className="text-xs text-neutral-500 mb-1 block">
-                      缩放: {scale}%
+                      缩放: {maxWidth > 0 ? "由最大宽度决定" : `${scale}%`}
                     </label>
                     <input
                       type="range"
@@ -250,7 +278,23 @@ export function ImageDetailModal({
                       max={100}
                       value={scale}
                       onChange={(e) => setScale(Number(e.target.value))}
+                      disabled={maxWidth > 0}
                       className="w-full accent-blue-500"
+                    />
+                  </div>
+
+                  {/* Max width */}
+                  <div>
+                    <label className="text-xs text-neutral-500 mb-1 block">
+                      目标最大宽度 (px)
+                    </label>
+                    <input
+                      type="number"
+                      min={1}
+                      placeholder="不限制"
+                      value={maxWidth || ""}
+                      onChange={(e) => setMaxWidth(Math.max(0, Number(e.target.value) || 0))}
+                      className="w-full px-3 py-2 rounded-lg bg-neutral-800 border border-neutral-700 text-sm focus:border-blue-500 focus:outline-none"
                     />
                   </div>
                 </div>

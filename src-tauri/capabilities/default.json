@@ -9,6 +9,6 @@
     "dialog:default",
     "fs:default",
     "fs:allow-write-file",
-    "fs:allow-temp-write"
+    "fs:allow-temp-write-recursive"
   ]
 }

@@ -11,6 +11,16 @@ use std::sync::atomic::AtomicBool;
 use std::sync::Arc;
 use tauri::{AppHandle, Emitter};
 
+#[derive(Clone, serde::Serialize)]
+struct ExtractImagesDetailProgress {
+    pct: u8,
+    msg: String,
+    completed: usize,
+    total: usize,
+    active: usize,
+    worker_threads: usize,
+}
+
 #[tauri::command]
 async fn analyze_pdf(app: AppHandle, file_path: String) -> Result<PdfAnalysis, String> {
     let cancel = Arc::new(AtomicBool::new(false));
@@ -122,15 +132,31 @@ async fn list_images(
 async fn extract_images(
     app: AppHandle,
     input_path: String,
+    worker_threads: Option<usize>,
 ) -> Result<Vec<ExtractedImageInfo>, String> {
     let cancel = Arc::new(AtomicBool::new(false));
     let progress_app = app.clone();
+    let detail_progress_app = app.clone();
 
     let result = tauri::async_runtime::spawn_blocking(move || {
         compress_images::extract_images(
             &input_path,
+            worker_threads.unwrap_or(0),
             |pct, msg| {
                 let _ = progress_app.emit("extract-images-progress", (pct, msg));
+            },
+            |pct, msg, completed, total, active, worker_threads| {
+                let _ = detail_progress_app.emit(
+                    "extract-images-detail-progress",
+                    ExtractImagesDetailProgress {
+                        pct,
+                        msg: msg.to_string(),
+                        completed,
+                        total,
+                        active,
+                        worker_threads,
+                    },
+                );
             },
             cancel,
         )

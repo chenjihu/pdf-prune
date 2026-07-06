@@ -26,6 +26,46 @@ import { CompressImagesTab } from "./components/CompressImagesTab";
 
 type Tab = "prune" | "removeImages" | "compressImages";
 
+export interface ExtractProgress {
+  pct: number;
+  msg: string;
+  completed: number;
+  total: number;
+  active: number;
+  workerThreads: number;
+}
+
+interface ExtractProgressEvent {
+  pct: number;
+  msg: string;
+  completed: number;
+  total: number;
+  active: number;
+  worker_threads: number;
+}
+
+function parseExtractProgress(pct: number, msg: string, previous: ExtractProgress | null): ExtractProgress {
+  const threadsMatch = msg.match(/(\d+)\s*线程/);
+  const workerThreads = threadsMatch ? Number(threadsMatch[1]) : previous?.workerThreads ?? 0;
+  const decodeMatch = msg.match(/\((\d+)\/(\d+)(?:[,，][^)]+)?\)/);
+  if (decodeMatch) {
+    return {
+      pct,
+      msg,
+      completed: Number(decodeMatch[1]),
+      total: Number(decodeMatch[2]),
+      active: Math.min(workerThreads, Math.max(0, Number(decodeMatch[2]) - Number(decodeMatch[1]))),
+      workerThreads,
+    };
+  }
+
+  const totalMatch = msg.match(/共\s*(\d+)\s*张图片|解码\s*(\d+)\s*张图片/);
+  const total = totalMatch ? Number(totalMatch[1] ?? totalMatch[2]) : previous?.total ?? 0;
+  const completed = pct >= 100 && total > 0 ? total : previous?.completed ?? 0;
+  const active = pct >= 100 ? 0 : previous?.active ?? 0;
+  return { pct, msg, completed, total, active, workerThreads };
+}
+
 function App() {
   const [tab, setTab] = useState<Tab>("prune");
   const [analysis, setAnalysis] = useState<PdfAnalysis | null>(null);
@@ -55,6 +95,7 @@ function App() {
   const [extractError, setExtractError] = useState<string | null>(null);
   const [extractedImages, setExtractedImages] = useState<ExtractedImageInfo[] | null>(null);
   const [compressInputPath, setCompressInputPath] = useState<string | null>(null);
+  const [extractProgress, setExtractProgress] = useState<ExtractProgress | null>(null);
 
   const openPdf = useCallback(async () => {
     try {
@@ -161,7 +202,7 @@ function App() {
     setScanResults(null);
   }, []);
 
-  const handleExtractImages = useCallback(async () => {
+  const handleExtractImages = useCallback(async (workerThreads: number) => {
     try {
       const selected = await open({
         filters: [{ name: "PDF 文件", extensions: ["pdf"] }],
@@ -172,11 +213,13 @@ function App() {
       setExtractError(null);
       setExtractedImages(null);
       setCompressInputPath(selected);
+      setExtractProgress({ pct: 0, msg: "准备中...", completed: 0, total: 0, active: 0, workerThreads });
       setStartTime(Date.now());
       setEndTime(null);
 
       const result = await invoke<ExtractedImageInfo[]>("extract_images", {
         inputPath: selected,
+        workerThreads,
       });
       setExtractedImages(result);
       setEndTime(Date.now());
@@ -185,6 +228,7 @@ function App() {
       setEndTime(Date.now());
     } finally {
       setExtracting(false);
+      setExtractProgress(null);
     }
   }, []);
 
@@ -192,6 +236,7 @@ function App() {
     setExtractedImages(null);
     setExtractError(null);
     setCompressInputPath(null);
+    setExtractProgress(null);
     setStartTime(null);
     setEndTime(null);
     setElapsedTime(0);
@@ -257,10 +302,31 @@ function App() {
       setRemoveImagesProgress({ pct, msg });
     }).then((fn) => { unlistenRemoveImages = fn; });
 
+    let unlistenExtractImages: UnlistenFn | null = null;
+    listen<[number, string]>("extract-images-progress", (event) => {
+      const [pct, msg] = event.payload;
+      setExtractProgress((prev) => parseExtractProgress(pct, msg, prev));
+    }).then((fn) => { unlistenExtractImages = fn; });
+
+    let unlistenExtractImagesDetail: UnlistenFn | null = null;
+    listen<ExtractProgressEvent>("extract-images-detail-progress", (event) => {
+      const payload = event.payload;
+      setExtractProgress({
+        pct: payload.pct,
+        msg: payload.msg,
+        completed: payload.completed,
+        total: payload.total,
+        active: payload.active,
+        workerThreads: payload.worker_threads,
+      });
+    }).then((fn) => { unlistenExtractImagesDetail = fn; });
+
     return () => {
       unlistenAnalyze?.();
       unlistenPrune?.();
       unlistenRemoveImages?.();
+      unlistenExtractImages?.();
+      unlistenExtractImagesDetail?.();
     };
   }, []);
 
@@ -718,6 +784,7 @@ function App() {
             extractError={extractError}
             extractedImages={extractedImages}
             inputPath={compressInputPath}
+            extractProgress={extractProgress}
             onExtract={handleExtractImages}
             onReset={resetCompressImages}
             elapsedTime={elapsedTime}

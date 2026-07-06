@@ -8,6 +8,9 @@ use std::path::Path;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::Arc;
 
+const MAX_IMAGE_DECODE_THREADS: usize = 32;
+const HUGE_PREVIEW_PIXEL_COUNT: u64 = 24_000_000;
+
 #[derive(Debug, Serialize, Clone, Deserialize)]
 pub struct ExtractedImageInfo {
     pub id: String,
@@ -382,7 +385,21 @@ fn make_preview(image_data: &[u8], max_dim: u32, out_path: &Path) -> Result<(), 
     save_preview_from_image(&img, max_dim, out_path)
 }
 
+fn pixel_count(width: u32, height: u32) -> u64 {
+    width as u64 * height as u64
+}
+
+fn make_preview_or_placeholder(width: u32, height: u32, image_data: &[u8], max_dim: u32, out_path: &Path) -> Result<(), String> {
+    if pixel_count(width, height) > HUGE_PREVIEW_PIXEL_COUNT {
+        return make_placeholder_preview(width, height, out_path);
+    }
+    make_preview(image_data, max_dim, out_path)
+}
+
 fn save_preview_from_image(img: &image::DynamicImage, max_dim: u32, out_path: &Path) -> Result<(), String> {
+    if pixel_count(img.width(), img.height()) > HUGE_PREVIEW_PIXEL_COUNT {
+        return make_placeholder_preview(img.width(), img.height(), out_path);
+    }
     let thumb = img.resize(max_dim, max_dim, image::imageops::FilterType::Triangle);
     thumb.save(out_path)
         .map_err(|e| format!("保存预览失败: {}", e))?;
@@ -546,7 +563,9 @@ fn raw_pixels_to_png(decompressed: Vec<u8>, predictor: i64, width: u32, height: 
 
 pub fn extract_images(
     input_path: &str,
+    worker_threads: usize,
     progress: impl Fn(u8, &str) + Sync,
+    detail_progress: impl Fn(u8, &str, usize, usize, usize, usize) + Sync,
     cancel: Arc<AtomicBool>,
 ) -> Result<Vec<ExtractedImageInfo>, String> {
     progress(5, "正在加载 PDF 文件...");
@@ -571,7 +590,7 @@ pub fn extract_images(
     // Phase 1: walk the PDF structure and collect image stream metadata.
     // Keep this pass light: filter decompression can dominate extraction time
     // for raw/Flate images, so it is deferred to the parallel decode phase.
-    let mut jobs: Vec<ImageJob> = Vec::new();
+    let mut image_metas: Vec<ImageMeta> = Vec::new();
     let mut seen_ids: HashSet<ObjectId> = HashSet::new();
 
     for (page_idx, (page_num, page_id)) in pages.iter().enumerate() {
@@ -612,7 +631,7 @@ pub fn extract_images(
                 let name_str = String::from_utf8_lossy(name).to_string();
                 let predictor = get_decode_parms_predictor(stream).map(|(p, _)| p).unwrap_or(1);
 
-                jobs.push(ImageJob {
+                image_metas.push(ImageMeta {
                     id: *id,
                     page_num: *page_num,
                     name: name_str,
@@ -621,7 +640,6 @@ pub fn extract_images(
                     color_space,
                     bpc,
                     predictor,
-                    content: stream.content.clone(),
                     filters: get_filter_names(stream),
                     decode_parms: get_decode_parms_list(stream),
                 });
@@ -633,25 +651,92 @@ pub fn extract_images(
         return Err("已取消".to_string());
     }
 
-    // Phase 2: resolve filters, decode pixels, and encode previews/PNGs in
-    // parallel. This is the CPU-heavy part, so run it across all cores.
-    progress(50, &format!("正在解码 {} 张图片...", jobs.len()));
-    let total_jobs = jobs.len().max(1);
-    let done = AtomicUsize::new(0);
+    let worker_threads = normalize_worker_threads(worker_threads);
+    progress(50, &format!("扫描完成，共 {} 张图片，将使用 {} 线程并行提取", image_metas.len(), worker_threads));
+    detail_progress(
+        50,
+        &format!("扫描完成，共 {} 张图片，将使用 {} 线程并行提取", image_metas.len(), worker_threads),
+        0,
+        image_metas.len(),
+        0,
+        worker_threads,
+    );
 
-    let mut images: Vec<ExtractedImageInfo> = jobs
-        .into_par_iter()
-        .filter_map(|job| {
+    // Phase 2: resolve filters, decode pixels, and encode previews/PNGs in
+    // parallel. This is the CPU-heavy part, so run it on a per-extraction
+    // pool whose width is controlled by the UI.
+    progress(50, &format!("正在并行解码 {} 张图片 (0/{}, {}线程)...", image_metas.len(), image_metas.len(), worker_threads));
+    detail_progress(
+        50,
+        &format!("正在并行解码 {} 张图片", image_metas.len()),
+        0,
+        image_metas.len(),
+        worker_threads.min(image_metas.len()),
+        worker_threads,
+    );
+    let total_jobs = image_metas.len().max(1);
+    let done = AtomicUsize::new(0);
+    let pool = rayon::ThreadPoolBuilder::new()
+        .num_threads(worker_threads)
+        .thread_name(|idx| format!("pdf-prune-image-extract-{}", idx))
+        .build()
+        .map_err(|e| format!("创建图片提取线程池失败: {}", e))?;
+
+    let mut images: Vec<ExtractedImageInfo> = pool.install(|| {
+        let mut images: Vec<ExtractedImageInfo> = Vec::new();
+        let mut idx = 0usize;
+        while idx < image_metas.len() {
             if cancel.load(Ordering::Relaxed) {
-                return None;
+                return Err("已取消".to_string());
             }
-            let result = decode_image_job(job, &temp_dir);
-            let n = done.fetch_add(1, Ordering::Relaxed) + 1;
-            let pct = 50 + ((n * 50) / total_jobs);
-            progress(pct.min(99) as u8, &format!("正在解码图片 ({}/{})...", n, total_jobs));
-            result
-        })
-        .collect();
+
+            let batch_end = next_decode_batch_end(&image_metas, idx, worker_threads);
+            let active_count = batch_end.saturating_sub(idx);
+            let completed_before_batch = done.load(Ordering::Relaxed);
+            detail_progress(
+                50 + ((completed_before_batch * 50) / total_jobs).min(49) as u8,
+                &format!("正在并行解码图片 ({}/{}, {}线程)...", completed_before_batch, total_jobs, worker_threads),
+                completed_before_batch,
+                image_metas.len(),
+                active_count,
+                worker_threads,
+            );
+            let batch_jobs: Vec<ImageJob> = image_metas[idx..batch_end]
+                .iter()
+                .filter_map(|meta| build_image_job(meta, &doc))
+                .collect();
+
+            let mut batch_images: Vec<ExtractedImageInfo> = batch_jobs
+                .into_par_iter()
+                .filter_map(|job| {
+                    if cancel.load(Ordering::Relaxed) {
+                        return None;
+                    }
+                    let result = decode_image_job(job, &temp_dir);
+                    let n = done.fetch_add(1, Ordering::Relaxed) + 1;
+                    let pct = 50 + ((n * 50) / total_jobs);
+                    let active = worker_threads.min(total_jobs.saturating_sub(n));
+                    progress(
+                        pct.min(99) as u8,
+                        &format!("正在并行解码图片 ({}/{}, {}线程)...", n, total_jobs, worker_threads),
+                    );
+                    detail_progress(
+                        pct.min(99) as u8,
+                        &format!("正在并行解码图片 ({}/{}, {}线程)...", n, total_jobs, worker_threads),
+                        n,
+                        image_metas.len(),
+                        active,
+                        worker_threads,
+                    );
+                    result
+                })
+                .collect();
+
+            images.append(&mut batch_images);
+            idx = batch_end;
+        }
+        Ok(images)
+    })?;
 
     if cancel.load(Ordering::Relaxed) {
         return Err("已取消".to_string());
@@ -659,7 +744,30 @@ pub fn extract_images(
 
     images.sort_by(|a, b| a.page.cmp(&b.page).then_with(|| a.id.cmp(&b.id)));
     progress(100, &format!("完成，共提取 {} 张图片", images.len()));
+    detail_progress(100, &format!("完成，共提取 {} 张图片", images.len()), image_metas.len(), image_metas.len(), 0, worker_threads);
     Ok(images)
+}
+
+fn normalize_worker_threads(worker_threads: usize) -> usize {
+    let default_threads = std::thread::available_parallelism()
+        .map(|n| n.get())
+        .unwrap_or(4);
+    let requested = if worker_threads == 0 { default_threads } else { worker_threads };
+    requested.clamp(1, MAX_IMAGE_DECODE_THREADS)
+}
+
+#[derive(Clone)]
+struct ImageMeta {
+    id: ObjectId,
+    page_num: u32,
+    name: String,
+    width: u32,
+    height: u32,
+    color_space: String,
+    bpc: u8,
+    predictor: i64,
+    filters: Vec<Vec<u8>>,
+    decode_parms: Vec<Option<Dictionary>>,
 }
 
 struct ImageJob {
@@ -674,6 +782,44 @@ struct ImageJob {
     content: Vec<u8>,
     filters: Vec<Vec<u8>>,
     decode_parms: Vec<Option<Dictionary>>,
+}
+
+fn next_decode_batch_end(metas: &[ImageMeta], start: usize, worker_threads: usize) -> usize {
+    let max_batch = worker_threads.max(1);
+    let first_is_huge = pixel_count(metas[start].width, metas[start].height) > HUGE_PREVIEW_PIXEL_COUNT;
+    if first_is_huge {
+        return start + 1;
+    }
+
+    let mut end = start + 1;
+    while end < metas.len() && end - start < max_batch {
+        if pixel_count(metas[end].width, metas[end].height) > HUGE_PREVIEW_PIXEL_COUNT {
+            break;
+        }
+        end += 1;
+    }
+    end
+}
+
+fn build_image_job(meta: &ImageMeta, doc: &Document) -> Option<ImageJob> {
+    let stream = match doc.get_object(meta.id) {
+        Ok(Object::Stream(s)) => s,
+        _ => return None,
+    };
+
+    Some(ImageJob {
+        id: meta.id,
+        page_num: meta.page_num,
+        name: meta.name.clone(),
+        width: meta.width,
+        height: meta.height,
+        color_space: meta.color_space.clone(),
+        bpc: meta.bpc,
+        predictor: meta.predictor,
+        content: stream.content.clone(),
+        filters: meta.filters.clone(),
+        decode_parms: meta.decode_parms.clone(),
+    })
 }
 
 fn decode_image_job(job: ImageJob, temp_dir: &Path) -> Option<ExtractedImageInfo> {
@@ -713,7 +859,7 @@ fn decode_image_job(job: ImageJob, temp_dir: &Path) -> Option<ExtractedImageInfo
             let tp = temp_dir.join(format!("{}.jpg", temp_filename));
             let pp = temp_dir.join(&preview_filename);
             std::fs::write(&tp, &buffer).ok()?;
-            if make_preview(&buffer, 400, &pp).is_err() {
+            if make_preview_or_placeholder(width, height, &buffer, 400, &pp).is_err() {
                 let _ = std::fs::copy(&tp, &pp);
             }
             (tp.to_string_lossy().to_string(), pp.to_string_lossy().to_string(), file_size, true)
@@ -726,7 +872,7 @@ fn decode_image_job(job: ImageJob, temp_dir: &Path) -> Option<ExtractedImageInfo
                     let tp = temp_dir.join(format!("{}.png", temp_filename));
                     let pp = temp_dir.join(&preview_filename);
                     std::fs::write(&tp, &png_data).ok()?;
-                    if make_preview(&png_data, 400, &pp).is_err() {
+                    if make_preview_or_placeholder(width, height, &png_data, 400, &pp).is_err() {
                         let _ = std::fs::copy(&tp, &pp);
                     }
                     (tp.to_string_lossy().to_string(), pp.to_string_lossy().to_string(), file_size, true)
@@ -784,7 +930,7 @@ fn decode_image_job(job: ImageJob, temp_dir: &Path) -> Option<ExtractedImageInfo
                     let tp = temp_dir.join(format!("{}.png", temp_filename));
                     let pp = temp_dir.join(&preview_filename);
                     std::fs::write(&tp, &png_data).ok()?;
-                    if make_preview(&png_data, 400, &pp).is_err() {
+                    if make_preview_or_placeholder(w, h, &png_data, 400, &pp).is_err() {
                         let _ = std::fs::copy(&tp, &pp);
                     }
                     (tp.to_string_lossy().to_string(), pp.to_string_lossy().to_string(), file_size, true)
@@ -917,7 +1063,7 @@ pub fn write_compressed_images(
                 stream_obj.dict.set("BitsPerComponent", Object::Integer(8));
                 // Remove any existing DecodeParms that might conflict
                 let _ = stream_obj.dict.remove(b"DecodeParms");
-                stream_obj.content = compressed_data;
+                stream_obj.set_content(compressed_data);
             }
             "png" => {
                 // Decode PNG, re-encode as FlateDecode raw pixels
@@ -968,7 +1114,7 @@ pub fn write_compressed_images(
                 stream_obj.dict.set("ColorSpace", Object::Name(b"DeviceRGB".to_vec()));
                 stream_obj.dict.set("BitsPerComponent", Object::Integer(8));
                 let _ = stream_obj.dict.remove(b"DecodeParms");
-                stream_obj.content = jpeg_data;
+                stream_obj.set_content(jpeg_data);
             }
             _ => {
                 actions.push(format!("跳过 {}: 不支持的格式 {}", entry.object_id, entry.format));
