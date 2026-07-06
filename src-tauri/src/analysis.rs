@@ -59,13 +59,9 @@ fn stream_content_size(stream: &Stream) -> usize {
 
 fn estimate_object_size(obj: &Object) -> usize {
     match obj {
-        Object::Stream(stream) => {
-            stream_content_size(stream) + estimate_dict_size(&stream.dict)
-        }
+        Object::Stream(stream) => stream_content_size(stream) + estimate_dict_size(&stream.dict),
         Object::Dictionary(dict) => estimate_dict_size(dict),
-        Object::Array(arr) => {
-            arr.iter().map(estimate_object_size).sum::<usize>() + 8
-        }
+        Object::Array(arr) => arr.iter().map(estimate_object_size).sum::<usize>() + 8,
         Object::String(s, _) => s.len() + 4,
         Object::Name(n) => n.len() + 4,
         Object::Integer(_) | Object::Real(_) => 16,
@@ -162,7 +158,9 @@ fn analyze_with_qpdf(
     cancel: Arc<AtomicBool>,
 ) -> Result<PdfAnalysis, String> {
     progress(10, "检测到超大 PDF，使用 qpdf 进行快速扫描...");
-    if cancel.load(Ordering::Relaxed) { return Err("已取消".to_string()); }
+    if cancel.load(Ordering::Relaxed) {
+        return Err("已取消".to_string());
+    }
 
     // Get page count from pdfinfo (fast, reliable)
     let page_count = std::process::Command::new("pdfinfo")
@@ -188,16 +186,22 @@ fn analyze_with_qpdf(
     // qpdf may exit with code 3 due to warnings (e.g. objects with offset 0),
     // but the JSON output on stdout is still valid. Only fail if stdout is empty.
     if output.stdout.is_empty() {
-        return Err(format!("qpdf 未产生输出，退出码: {:?}", output.status.code()));
+        return Err(format!(
+            "qpdf 未产生输出，退出码: {:?}",
+            output.status.code()
+        ));
     }
 
     progress(40, "正在解析 qpdf 结果...");
-    if cancel.load(Ordering::Relaxed) { return Err("已取消".to_string()); }
+    if cancel.load(Ordering::Relaxed) {
+        return Err("已取消".to_string());
+    }
 
     let json: serde_json::Value = serde_json::from_slice(&output.stdout)
         .map_err(|e| format!("解析 qpdf JSON 失败: {}", e))?;
 
-    let qpdf_arr = json.get("qpdf")
+    let qpdf_arr = json
+        .get("qpdf")
         .and_then(|v| v.as_array())
         .ok_or("qpdf JSON 格式错误: 缺少 qpdf 数组")?;
     if qpdf_arr.len() < 2 {
@@ -206,7 +210,8 @@ fn analyze_with_qpdf(
     let meta = qpdf_arr[0].as_object().ok_or("qpdf JSON 元数据格式错误")?;
     let objects = qpdf_arr[1].as_object().ok_or("qpdf JSON 对象格式错误")?;
 
-    let pdf_version = meta.get("pdfversion")
+    let pdf_version = meta
+        .get("pdfversion")
         .and_then(|v| v.as_str())
         .map(|s| s.replace("PDF", ""))
         .unwrap_or_else(|| "1.7".to_string());
@@ -215,9 +220,12 @@ fn analyze_with_qpdf(
     progress(50, "正在提取对象信息...");
 
     // Build object info map
-    let mut object_sizes: std::collections::HashMap<ObjectId, usize> = std::collections::HashMap::new();
-    let mut object_dicts: std::collections::HashMap<ObjectId, serde_json::Value> = std::collections::HashMap::new();
-    let mut object_is_stream: std::collections::HashSet<ObjectId> = std::collections::HashSet::new();
+    let mut object_sizes: std::collections::HashMap<ObjectId, usize> =
+        std::collections::HashMap::new();
+    let mut object_dicts: std::collections::HashMap<ObjectId, serde_json::Value> =
+        std::collections::HashMap::new();
+    let mut object_is_stream: std::collections::HashSet<ObjectId> =
+        std::collections::HashSet::new();
     let mut root_ref: Option<ObjectId> = None;
 
     for (key, val) in objects.iter() {
@@ -240,7 +248,10 @@ fn analyze_with_qpdf(
         let Some(oid) = obj_id else { continue };
 
         let (dict, _is_stream, raw_size) = if let Some(stream) = val.get("stream") {
-            let dict = stream.get("dict").cloned().unwrap_or(serde_json::Value::Object(serde_json::Map::new()));
+            let dict = stream
+                .get("dict")
+                .cloned()
+                .unwrap_or(serde_json::Value::Object(serde_json::Map::new()));
             let len = qpdf_dict_get_i64(&dict, "/Length").unwrap_or(0) as usize;
             object_is_stream.insert(oid);
             (dict, true, len.max(256))
@@ -262,14 +273,18 @@ fn analyze_with_qpdf(
     }
 
     progress(60, "正在分析对象引用关系...");
-    if cancel.load(Ordering::Relaxed) { return Err("已取消".to_string()); }
+    if cancel.load(Ordering::Relaxed) {
+        return Err("已取消".to_string());
+    }
 
     // BFS reachable objects from root
     let mut reachable: HashSet<ObjectId> = HashSet::new();
     if let Some(root) = root_ref {
         let mut queue = vec![root];
         while let Some(oid) = queue.pop() {
-            if !reachable.insert(oid) { continue; }
+            if !reachable.insert(oid) {
+                continue;
+            }
             if let Some(dict) = object_dicts.get(&oid) {
                 let mut refs = HashSet::new();
                 collect_qpdf_refs(dict, &mut refs);
@@ -281,27 +296,38 @@ fn analyze_with_qpdf(
             }
         }
     }
-    
+
     // Debug: Check if we have objects that aren't in object_dicts but are referenced
-    let missing_in_dicts: HashSet<_> = reachable.iter()
+    let missing_in_dicts: HashSet<_> = reachable
+        .iter()
         .filter(|oid| !object_dicts.contains_key(oid))
         .cloned()
         .collect();
     if !missing_in_dicts.is_empty() {
-        eprintln!("Warning: {} reachable objects not in object_dicts", missing_in_dicts.len());
+        eprintln!(
+            "Warning: {} reachable objects not in object_dicts",
+            missing_in_dicts.len()
+        );
     }
-    
+
     // Debug: Check if we have objects in object_dicts that aren't reachable
-    let unreachable_objects: Vec<_> = object_dicts.keys()
+    let unreachable_objects: Vec<_> = object_dicts
+        .keys()
         .filter(|oid| !reachable.contains(oid))
         .collect();
-    eprintln!("Total objects: {}, Reachable: {}, Unreachable: {}", 
-              total_object_count, reachable.len(), unreachable_objects.len());
-    
+    eprintln!(
+        "Total objects: {}, Reachable: {}, Unreachable: {}",
+        total_object_count,
+        reachable.len(),
+        unreachable_objects.len()
+    );
+
     let unused_object_count = total_object_count - reachable.len();
 
     progress(70, "正在分类对象...");
-    if cancel.load(Ordering::Relaxed) { return Err("已取消".to_string()); }
+    if cancel.load(Ordering::Relaxed) {
+        return Err("已取消".to_string());
+    }
 
     // Collect image IDs and font program IDs by following references
     let mut image_ids: HashSet<ObjectId> = HashSet::new();
@@ -379,13 +405,21 @@ fn analyze_with_qpdf(
                 false
             });
             let size = object_sizes.get(oid).copied().unwrap_or(0);
-            fonts.push(FontInfo { name, subtype, embedded, size, object_id: format!("{} {}", oid.0, oid.1) });
+            fonts.push(FontInfo {
+                name,
+                subtype,
+                embedded,
+                size,
+                object_id: format!("{} {}", oid.0, oid.1),
+            });
         }
     }
 
     // Sum sizes by category
     let sum_size = |ids: &HashSet<ObjectId>| {
-        ids.iter().filter_map(|id| object_sizes.get(id)).sum::<usize>()
+        ids.iter()
+            .filter_map(|id| object_sizes.get(id))
+            .sum::<usize>()
     };
     let image_size = sum_size(&image_ids);
     let image_count = image_ids.len();
@@ -400,9 +434,12 @@ fn analyze_with_qpdf(
 
     // Other size = total file size - categorized stream sizes - rough non-stream overhead
     // For simplicity, compute other as file_size - sum of all known stream sizes
-    let total_known_stream_size = image_size + font_size + form_xobject_size + content_stream_size + metadata_size;
+    let total_known_stream_size =
+        image_size + font_size + form_xobject_size + content_stream_size + metadata_size;
     let other_size = file_size.saturating_sub(total_known_stream_size);
-    let other_count = total_object_count.saturating_sub(image_count + font_count + form_xobject_count + content_stream_count + metadata_count);
+    let other_count = total_object_count.saturating_sub(
+        image_count + font_count + form_xobject_count + content_stream_count + metadata_count,
+    );
 
     let unused_size: usize = object_sizes
         .iter()
@@ -412,13 +449,48 @@ fn analyze_with_qpdf(
     let potential_savings = unused_size;
 
     let components = vec![
-        ComponentInfo { name: "图片".to_string(), count: image_count, size: image_size, description: "PDF 中内嵌的图片流".to_string() },
-        ComponentInfo { name: "字体".to_string(), count: font_count, size: font_size, description: "字体描述与字体程序".to_string() },
-        ComponentInfo { name: "内容流".to_string(), count: content_stream_count, size: content_stream_size, description: "页面绘制指令".to_string() },
-        ComponentInfo { name: "表单对象".to_string(), count: form_xobject_count, size: form_xobject_size, description: "Form XObject".to_string() },
-        ComponentInfo { name: "元数据".to_string(), count: metadata_count, size: metadata_size, description: "文档信息元数据".to_string() },
-        ComponentInfo { name: "其他对象".to_string(), count: other_count, size: other_size, description: "目录、数组、引用等".to_string() },
-        ComponentInfo { name: "未使用对象".to_string(), count: unused_object_count, size: unused_size, description: "垃圾对象".to_string() },
+        ComponentInfo {
+            name: "图片".to_string(),
+            count: image_count,
+            size: image_size,
+            description: "PDF 中内嵌的图片流".to_string(),
+        },
+        ComponentInfo {
+            name: "字体".to_string(),
+            count: font_count,
+            size: font_size,
+            description: "字体描述与字体程序".to_string(),
+        },
+        ComponentInfo {
+            name: "内容流".to_string(),
+            count: content_stream_count,
+            size: content_stream_size,
+            description: "页面绘制指令".to_string(),
+        },
+        ComponentInfo {
+            name: "表单对象".to_string(),
+            count: form_xobject_count,
+            size: form_xobject_size,
+            description: "Form XObject".to_string(),
+        },
+        ComponentInfo {
+            name: "元数据".to_string(),
+            count: metadata_count,
+            size: metadata_size,
+            description: "文档信息元数据".to_string(),
+        },
+        ComponentInfo {
+            name: "其他对象".to_string(),
+            count: other_count,
+            size: other_size,
+            description: "目录、数组、引用等".to_string(),
+        },
+        ComponentInfo {
+            name: "未使用对象".to_string(),
+            count: unused_object_count,
+            size: unused_size,
+            description: "垃圾对象".to_string(),
+        },
     ];
 
     progress(95, "正在汇总结果...");
@@ -437,17 +509,24 @@ fn analyze_with_qpdf(
 }
 
 fn is_image_stream(dict: &Dictionary) -> bool {
-    dict.get(b"Subtype").map(|v| name_eq(v, b"Image")).unwrap_or(false)
+    dict.get(b"Subtype")
+        .map(|v| name_eq(v, b"Image"))
+        .unwrap_or(false)
 }
 
 fn is_form_xobject(dict: &Dictionary) -> bool {
-    dict.get(b"Subtype").map(|v| name_eq(v, b"Form")).unwrap_or(false)
+    dict.get(b"Subtype")
+        .map(|v| name_eq(v, b"Form"))
+        .unwrap_or(false)
 }
 
 fn is_font_program(dict: &Dictionary) -> bool {
     // Check by Subtype
     if let Ok(subtype) = dict.get(b"Subtype") {
-        if name_eq(subtype, b"Type1C") || name_eq(subtype, b"OpenType") || name_eq(subtype, b"CIDFontType0C") {
+        if name_eq(subtype, b"Type1C")
+            || name_eq(subtype, b"OpenType")
+            || name_eq(subtype, b"CIDFontType0C")
+        {
             return true;
         }
     }
@@ -455,20 +534,22 @@ fn is_font_program(dict: &Dictionary) -> bool {
     if dict.get(b"Length1").is_ok() {
         return true;
     }
-    dict.get(b"Type").map(|v| name_eq(v, b"FontFile")).unwrap_or(false)
+    dict.get(b"Type")
+        .map(|v| name_eq(v, b"FontFile"))
+        .unwrap_or(false)
 }
 
 fn is_metadata_stream(dict: &Dictionary) -> bool {
-    dict.get(b"Type").map(|v| name_eq(v, b"Metadata")).unwrap_or(false)
+    dict.get(b"Type")
+        .map(|v| name_eq(v, b"Metadata"))
+        .unwrap_or(false)
 }
 
 fn get_name_string(dict: &Dictionary, key: &[u8]) -> Option<String> {
-    dict.get(key).ok().and_then(|obj| {
-        match obj {
-            Object::Name(name) => Some(String::from_utf8_lossy(name).to_string()),
-            Object::String(s, _) => Some(String::from_utf8_lossy(s).to_string()),
-            _ => None,
-        }
+    dict.get(key).ok().and_then(|obj| match obj {
+        Object::Name(name) => Some(String::from_utf8_lossy(name).to_string()),
+        Object::String(s, _) => Some(String::from_utf8_lossy(s).to_string()),
+        _ => None,
     })
 }
 
@@ -489,12 +570,16 @@ fn collect_font_info(doc: &Document) -> Vec<FontInfo> {
     let mut fonts = Vec::new();
     for (obj_id, obj) in &doc.objects {
         if let Object::Dictionary(dict) = obj {
-            if dict.get(b"Type").map(|v| name_eq(v, b"Font")).unwrap_or(false) {
+            if dict
+                .get(b"Type")
+                .map(|v| name_eq(v, b"Font"))
+                .unwrap_or(false)
+            {
                 let name = get_name_string(dict, b"BaseFont")
                     .or_else(|| get_name_string(dict, b"Name"))
                     .unwrap_or_else(|| "未命名字体".to_string());
-                let subtype = get_name_string(dict, b"Subtype")
-                    .unwrap_or_else(|| "未知".to_string());
+                let subtype =
+                    get_name_string(dict, b"Subtype").unwrap_or_else(|| "未知".to_string());
                 let embedded = is_font_embedded(dict, doc);
 
                 let mut total_size = estimate_object_size(obj);
@@ -568,8 +653,8 @@ fn parallel_traverse_objects(
     doc: &Document,
     progress: Arc<dyn Fn(u8, &str) + Send + Sync>,
 ) -> HashSet<ObjectId> {
-    use std::sync::Mutex;
     use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::sync::Mutex;
 
     let visited = Mutex::new(HashSet::new());
     let next_frontier = Mutex::new(Vec::new());
@@ -581,7 +666,13 @@ fn parallel_traverse_objects(
     {
         let mut v = visited.lock().unwrap();
         let mut frontier = next_frontier.lock().unwrap();
-        for key in [&b"Root"[..], &b"Info"[..], &b"Encrypt"[..], &b"AcroForm"[..], &b"Names"[..]] {
+        for key in [
+            &b"Root"[..],
+            &b"Info"[..],
+            &b"Encrypt"[..],
+            &b"AcroForm"[..],
+            &b"Names"[..],
+        ] {
             if let Ok(id) = doc.trailer.get(key).and_then(Object::as_reference) {
                 if v.insert(id) {
                     frontier.push(id);
@@ -597,36 +688,41 @@ fn parallel_traverse_objects(
         std::mem::swap(&mut current_frontier, &mut *frontier);
         !current_frontier.is_empty()
     } {
-        current_frontier
-            .par_chunks(1000)
-            .for_each(|chunk| {
-                let mut local_refs: Vec<ObjectId> = Vec::with_capacity(chunk.len() * 4);
-                for &id in chunk {
-                    if let Ok(obj) = doc.get_object(id) {
-                        collect_refs_from_object(doc, obj, &mut local_refs);
-                    }
+        current_frontier.par_chunks(1000).for_each(|chunk| {
+            let mut local_refs: Vec<ObjectId> = Vec::with_capacity(chunk.len() * 4);
+            for &id in chunk {
+                if let Ok(obj) = doc.get_object(id) {
+                    collect_refs_from_object(doc, obj, &mut local_refs);
                 }
+            }
 
-                let processed_count = processed.fetch_add(chunk.len(), Ordering::Relaxed);
-                let done = processed_count + chunk.len();
-                let last = last_reported.load(Ordering::Relaxed);
-                if done.saturating_sub(last) >= 1000 && last_reported.compare_exchange(last, done, Ordering::Relaxed, Ordering::Relaxed).is_ok() {
-                    let pct = (50 + (done * 14).min(total * 14) / total.max(1)) as u8;
-                    progress(pct, &format!("正在分析对象引用关系... (已处理 {} / {} 对象)", done, total));
-                }
+            let processed_count = processed.fetch_add(chunk.len(), Ordering::Relaxed);
+            let done = processed_count + chunk.len();
+            let last = last_reported.load(Ordering::Relaxed);
+            if done.saturating_sub(last) >= 1000
+                && last_reported
+                    .compare_exchange(last, done, Ordering::Relaxed, Ordering::Relaxed)
+                    .is_ok()
+            {
+                let pct = (50 + (done * 14).min(total * 14) / total.max(1)) as u8;
+                progress(
+                    pct,
+                    &format!("正在分析对象引用关系... (已处理 {} / {} 对象)", done, total),
+                );
+            }
 
-                if local_refs.is_empty() {
-                    return;
-                }
+            if local_refs.is_empty() {
+                return;
+            }
 
-                let mut v = visited.lock().unwrap();
-                let mut frontier = next_frontier.lock().unwrap();
-                for id in local_refs {
-                    if v.insert(id) {
-                        frontier.push(id);
-                    }
+            let mut v = visited.lock().unwrap();
+            let mut frontier = next_frontier.lock().unwrap();
+            for id in local_refs {
+                if v.insert(id) {
+                    frontier.push(id);
                 }
-            });
+            }
+        });
     }
 
     visited.into_inner().unwrap()
@@ -653,7 +749,11 @@ fn find_all_reachable(
     }
 }
 
-pub fn analyze_pdf(file_path: &str, progress: impl Fn(u8, &str) + Send + Sync + 'static, cancel: Arc<AtomicBool>) -> Result<PdfAnalysis, String> {
+pub fn analyze_pdf(
+    file_path: &str,
+    progress: impl Fn(u8, &str) + Send + Sync + 'static,
+    cancel: Arc<AtomicBool>,
+) -> Result<PdfAnalysis, String> {
     let path = Path::new(file_path);
     let file_size = path
         .metadata()
@@ -662,7 +762,9 @@ pub fn analyze_pdf(file_path: &str, progress: impl Fn(u8, &str) + Send + Sync + 
 
     let progress_arc: Arc<dyn Fn(u8, &str) + Send + Sync> = Arc::new(progress);
     progress_arc(5, "正在读取文件基本信息...");
-    if cancel.load(Ordering::Relaxed) { return Err("已取消".to_string()); }
+    if cancel.load(Ordering::Relaxed) {
+        return Err("已取消".to_string());
+    }
 
     // Quick scan: read the last 512 bytes to find xref start and get basic info
     // This gives the user immediate feedback before the full parse begins
@@ -675,8 +777,16 @@ pub fn analyze_pdf(file_path: &str, progress: impl Fn(u8, &str) + Send + Sync + 
                 if file.seek(SeekFrom::End(-512)).is_ok() {
                     let _ = file.read_exact(&mut tail);
                     // Check if it's a valid PDF
-                    if tail.windows(5).any(|w| w == b"%PDF-") || tail.windows(5).any(|w| w == b"%%EOF") {
-                        progress_arc(10, &format!("文件大小: {}，正在解析对象表...", format_file_size(file_size)));
+                    if tail.windows(5).any(|w| w == b"%PDF-")
+                        || tail.windows(5).any(|w| w == b"%%EOF")
+                    {
+                        progress_arc(
+                            10,
+                            &format!(
+                                "文件大小: {}，正在解析对象表...",
+                                format_file_size(file_size)
+                            ),
+                        );
                     }
                 }
             } else {
@@ -685,7 +795,9 @@ pub fn analyze_pdf(file_path: &str, progress: impl Fn(u8, &str) + Send + Sync + 
         }
     }
 
-    if cancel.load(Ordering::Relaxed) { return Err("已取消".to_string()); }
+    if cancel.load(Ordering::Relaxed) {
+        return Err("已取消".to_string());
+    }
 
     // Use load_filtered to skip stream content — we only need dict metadata for analysis.
     // The filter stores the actual content length as a direct Integer in the dict before
@@ -696,7 +808,9 @@ pub fn analyze_pdf(file_path: &str, progress: impl Fn(u8, &str) + Send + Sync + 
             // Replace Length (which may be an indirect reference) with the actual content size
             let content_len = stream.content.len();
             if content_len > 0 {
-                stream.dict.set(b"Length", Object::Integer(content_len as i64));
+                stream
+                    .dict
+                    .set(b"Length", Object::Integer(content_len as i64));
             }
             // Clear content to avoid holding hundreds of MB in memory
             stream.content.clear();
@@ -713,12 +827,15 @@ pub fn analyze_pdf(file_path: &str, progress: impl Fn(u8, &str) + Send + Sync + 
     let doc = Document::load_filtered(path, filter_func)
         .map_err(|e| format!("无法加载PDF文件: {}", e))?;
 
-    if cancel.load(Ordering::Relaxed) { return Err("已取消".to_string()); }
+    if cancel.load(Ordering::Relaxed) {
+        return Err("已取消".to_string());
+    }
     progress_arc(40, "正在解析页面结构...");
 
     // Page count: read Count directly from root Pages dictionary first (fastest and most reliable)
     let page_count = {
-        let count_from_pages = doc.trailer
+        let count_from_pages = doc
+            .trailer
             .get(b"Root")
             .ok()
             .and_then(|obj| obj.as_reference().ok())
@@ -766,12 +883,16 @@ pub fn analyze_pdf(file_path: &str, progress: impl Fn(u8, &str) + Send + Sync + 
     // Find reachable objects using parallel BFS for large documents
     let progress_clone = progress_arc.clone();
     progress_clone(50, "正在分析对象引用关系...");
-    if cancel.load(Ordering::Relaxed) { return Err("已取消".to_string()); }
+    if cancel.load(Ordering::Relaxed) {
+        return Err("已取消".to_string());
+    }
     let reachable: HashSet<ObjectId> = find_all_reachable(&doc, progress_clone);
     let unused_object_count = total_object_count - reachable.len();
 
     progress_arc(65, "正在分类对象...");
-    if cancel.load(Ordering::Relaxed) { return Err("已取消".to_string()); }
+    if cancel.load(Ordering::Relaxed) {
+        return Err("已取消".to_string());
+    }
 
     // Analyze each object
     let mut image_count = 0usize;
@@ -789,18 +910,25 @@ pub fn analyze_pdf(file_path: &str, progress: impl Fn(u8, &str) + Send + Sync + 
     let mut unused_size = 0usize;
 
     // Track font program object IDs referenced by FontDescriptor dictionaries (parallel)
-    let font_program_ids: HashSet<ObjectId> = doc.objects
+    let font_program_ids: HashSet<ObjectId> = doc
+        .objects
         .par_iter()
         .filter_map(|(_, obj)| {
             if let Object::Dictionary(dict) = obj {
-                if dict.get(b"Type").map(|v| name_eq(v, b"FontDescriptor")).unwrap_or(false) {
+                if dict
+                    .get(b"Type")
+                    .map(|v| name_eq(v, b"FontDescriptor"))
+                    .unwrap_or(false)
+                {
                     let mut ids = Vec::new();
                     for key in [&b"FontFile"[..], &b"FontFile2"[..], &b"FontFile3"[..]] {
                         if let Ok(Object::Reference(id)) = dict.get(key) {
                             ids.push(*id);
                         }
                     }
-                    if !ids.is_empty() { return Some(ids); }
+                    if !ids.is_empty() {
+                        return Some(ids);
+                    }
                 }
             }
             None
@@ -809,12 +937,17 @@ pub fn analyze_pdf(file_path: &str, progress: impl Fn(u8, &str) + Send + Sync + 
         .collect();
 
     // Count font objects (parallel)
-    let font_count = doc.objects
+    let font_count = doc
+        .objects
         .par_iter()
         .filter(|(_, obj)| {
             if let Object::Dictionary(dict) = obj {
-                dict.get(b"Type").map(|v| name_eq(v, b"Font")).unwrap_or(false)
-            } else { false }
+                dict.get(b"Type")
+                    .map(|v| name_eq(v, b"Font"))
+                    .unwrap_or(false)
+            } else {
+                false
+            }
         })
         .count();
 
@@ -830,7 +963,9 @@ pub fn analyze_pdf(file_path: &str, progress: impl Fn(u8, &str) + Send + Sync + 
         .map(|chunk| {
             let mut stats = PartialStats::default();
             for (obj_id, obj) in chunk {
-                if cancel.load(Ordering::Relaxed) { return PartialStats::default(); }
+                if cancel.load(Ordering::Relaxed) {
+                    return PartialStats::default();
+                }
                 let obj_size = get_object_size(obj);
                 let is_reachable = reachable.contains(obj_id);
 
@@ -891,9 +1026,16 @@ pub fn analyze_pdf(file_path: &str, progress: impl Fn(u8, &str) + Send + Sync + 
 
             let done = processed.fetch_add(chunk.len(), Ordering::Relaxed) + chunk.len();
             let last = class_last_reported.load(Ordering::Relaxed);
-            if done.saturating_sub(last) >= 2000 && class_last_reported.compare_exchange(last, done, Ordering::Relaxed, Ordering::Relaxed).is_ok() {
+            if done.saturating_sub(last) >= 2000
+                && class_last_reported
+                    .compare_exchange(last, done, Ordering::Relaxed, Ordering::Relaxed)
+                    .is_ok()
+            {
                 let pct = (65 + (done * 29).min(obj_count * 29) / obj_count.max(1)) as u8;
-                progress_class(pct, &format!("正在分类对象... (已处理 {} / {} 对象)", done, obj_count));
+                progress_class(
+                    pct,
+                    &format!("正在分类对象... (已处理 {} / {} 对象)", done, obj_count),
+                );
             }
 
             stats

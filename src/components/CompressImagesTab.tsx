@@ -86,6 +86,10 @@ const IMAGE_LIST_PAGE_SIZE = 120;
 const RAW_FORMAT_HELP =
   "raw 表示这张图是 PDF 内部的原始图像数据或特殊编码流，不是可直接保存的 JPEG/PNG/WebP。它通常需要结合宽高、颜色空间、位深和 DecodeParms 才能还原，部分 raw 图片可能无法压缩。";
 
+function pdfImageSize(image: ExtractedImageInfo): number {
+  return image.pdf_size ?? image.file_size;
+}
+
 function getDefaultExtractThreads(): number {
   const hardwareThreads = navigator.hardwareConcurrency || 4;
   return Math.min(8, Math.max(1, hardwareThreads));
@@ -213,8 +217,9 @@ export function CompressImagesTab({
       if (filters.maxWidth > 0 && img.width > filters.maxWidth) return false;
       if (filters.minHeight > 0 && img.height < filters.minHeight) return false;
       if (filters.maxHeight > 0 && img.height > filters.maxHeight) return false;
-      if (filters.minSizeKB > 0 && img.file_size / 1024 < filters.minSizeKB) return false;
-      if (filters.maxSizeKB > 0 && img.file_size / 1024 > filters.maxSizeKB) return false;
+      const sourceSize = pdfImageSize(img);
+      if (filters.minSizeKB > 0 && sourceSize / 1024 < filters.minSizeKB) return false;
+      if (filters.maxSizeKB > 0 && sourceSize / 1024 > filters.maxSizeKB) return false;
       if (filters.compressionState === "compressed" && !preview) return false;
       if (filters.compressionState === "uncompressed" && preview) return false;
       if (
@@ -317,7 +322,7 @@ export function CompressImagesTab({
 
         previews.set(img.id, {
           object_id: img.object_id,
-          original_size: result.originalSize,
+          original_size: pdfImageSize(img),
           compressed_size: result.compressedSize,
           compressed_preview_path: previewUrl,
           format: compressFormat,
@@ -390,8 +395,13 @@ export function CompressImagesTab({
   // Total size stats
   const totalOriginalSize = useMemo(() => {
     if (!extractedImages) return 0;
-    return extractedImages.reduce((sum, img) => sum + img.file_size, 0);
-  }, [extractedImages]);
+    let sum = 0;
+    for (const id of compressedPreviews.keys()) {
+      const img = extractedImages.find((item) => item.id === id);
+      if (img) sum += pdfImageSize(img);
+    }
+    return sum;
+  }, [extractedImages, compressedPreviews]);
 
   const totalCompressedSize = useMemo(() => {
     let sum = 0;
@@ -952,7 +962,9 @@ export function CompressImagesTab({
                         </div>
                       )}
                       <div className="flex items-center justify-between">
-                        <span className="text-neutral-500">{formatKB(img.file_size)}</span>
+                        <span className="text-neutral-500" title={`提取文件: ${formatKB(img.file_size)}`}>
+                          PDF {formatKB(pdfImageSize(img))}
+                        </span>
                         {preview && (
                           <span className="text-green-400">
                             {formatKB(preview.compressed_size)}

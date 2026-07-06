@@ -71,8 +71,12 @@ fn is_already_compressed(dict: &Dictionary) -> bool {
         match filter {
             Object::Name(name) => {
                 let n = name.as_slice();
-                return n == b"FlateDecode" || n == b"LZWDecode" || n == b"DCTDecode"
-                    || n == b"CCITTFaxDecode" || n == b"JPXDecode" || n == b"RunLengthDecode";
+                return n == b"FlateDecode"
+                    || n == b"LZWDecode"
+                    || n == b"DCTDecode"
+                    || n == b"CCITTFaxDecode"
+                    || n == b"JPXDecode"
+                    || n == b"RunLengthDecode";
             }
             Object::Array(arr) => {
                 for item in arr {
@@ -91,16 +95,23 @@ fn is_already_compressed(dict: &Dictionary) -> bool {
 }
 
 fn is_image_stream(dict: &Dictionary) -> bool {
-    dict.get(b"Subtype").map(|v| name_eq(v, b"Image")).unwrap_or(false)
+    dict.get(b"Subtype")
+        .map(|v| name_eq(v, b"Image"))
+        .unwrap_or(false)
 }
 
 fn is_font_program(dict: &Dictionary) -> bool {
     if let Ok(subtype) = dict.get(b"Subtype") {
-        if name_eq(subtype, b"Type1C") || name_eq(subtype, b"OpenType") || name_eq(subtype, b"CIDFontType0C") {
+        if name_eq(subtype, b"Type1C")
+            || name_eq(subtype, b"OpenType")
+            || name_eq(subtype, b"CIDFontType0C")
+        {
             return true;
         }
     }
-    dict.get(b"Type").map(|v| name_eq(v, b"FontFile")).unwrap_or(false)
+    dict.get(b"Type")
+        .map(|v| name_eq(v, b"FontFile"))
+        .unwrap_or(false)
 }
 
 pub fn prune_pdf(
@@ -117,13 +128,17 @@ pub fn prune_pdf(
         .len() as usize;
 
     progress(5, "正在加载 PDF 文件...");
-    if cancel.load(Ordering::Relaxed) { return Err("已取消".to_string()); }
+    if cancel.load(Ordering::Relaxed) {
+        return Err("已取消".to_string());
+    }
 
     let mut doc = Document::load(input).map_err(|e| format!("无法加载PDF: {}", e))?;
     let mut actions = Vec::new();
 
     progress(15, "正在移除元数据和脚本...");
-    if cancel.load(Ordering::Relaxed) { return Err("已取消".to_string()); }
+    if cancel.load(Ordering::Relaxed) {
+        return Err("已取消".to_string());
+    }
 
     // Helper: get catalog ObjectId from trailer
     let catalog_id = doc.trailer.get(b"Root").and_then(Object::as_reference).ok();
@@ -282,7 +297,9 @@ pub fn prune_pdf(
     }
 
     progress(40, "正在压缩未压缩的流对象...");
-    if cancel.load(Ordering::Relaxed) { return Err("已取消".to_string()); }
+    if cancel.load(Ordering::Relaxed) {
+        return Err("已取消".to_string());
+    }
 
     // 11. Compress uncompressed streams (not images, not font programs)
     if options.compress_streams {
@@ -313,7 +330,9 @@ pub fn prune_pdf(
                         let compressed = compress_stream_data(&stream.content);
                         if compressed.len() < original_len {
                             stream.content = compressed;
-                            stream.dict.set("Filter", Object::Name(b"FlateDecode".to_vec()));
+                            stream
+                                .dict
+                                .set("Filter", Object::Name(b"FlateDecode".to_vec()));
                             let new_len = stream.content.len() as i64;
                             stream.dict.set("Length", Object::Integer(new_len));
                             compressed_count += 1;
@@ -328,11 +347,13 @@ pub fn prune_pdf(
     }
 
     progress(70, "正在清理未使用对象...");
-    if cancel.load(Ordering::Relaxed) { return Err("已取消".to_string()); }
+    if cancel.load(Ordering::Relaxed) {
+        return Err("已取消".to_string());
+    }
 
     // 12. Remove unused objects (garbage collect) - use lopdf's built-in traverse
     if options.remove_unused_objects {
-        let reachable: HashSet<ObjectId> = doc.traverse_objects(|_|{}).into_iter().collect();
+        let reachable: HashSet<ObjectId> = doc.traverse_objects(|_| {}).into_iter().collect();
         let all_ids: Vec<ObjectId> = doc.objects.keys().cloned().collect();
         let mut removed_count = 0;
 
@@ -355,7 +376,9 @@ pub fn prune_pdf(
     }
 
     progress(85, "正在保存修剪后的文件...");
-    if cancel.load(Ordering::Relaxed) { return Err("已取消".to_string()); }
+    if cancel.load(Ordering::Relaxed) {
+        return Err("已取消".to_string());
+    }
 
     // Save the pruned document
     doc.compress();

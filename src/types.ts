@@ -119,6 +119,7 @@ export interface ExtractedImageInfo {
   width: number;
   height: number;
   file_size: number;
+  pdf_size: number;
   format: string;
   color_space: string;
   bits_per_component: number;

@@ -22,6 +22,10 @@ import { ImageCompare } from "./ImageCompare";
 const RAW_FORMAT_HELP =
   "raw 表示这张图是 PDF 内部的原始图像数据或特殊编码流，不是可直接保存的 JPEG/PNG/WebP。它通常需要结合宽高、颜色空间、位深和 DecodeParms 才能还原，部分 raw 图片可能无法压缩。";
 
+function pdfImageSize(image: ExtractedImageInfo): number {
+  return image.pdf_size ?? image.file_size;
+}
+
 function ImageFormatBadge({ format }: { format: string }) {
   if (format !== "raw") {
     return <span>{format.toUpperCase()}</span>;
@@ -111,7 +115,7 @@ export function ImageDetailModal({
 
       onCompressed(image.id, {
         object_id: image.object_id,
-        original_size: result.originalSize,
+        original_size: pdfImageSize(image),
         compressed_size: result.compressedSize,
         compressed_preview_path: previewUrl,
         format,
@@ -190,7 +194,7 @@ export function ImageDetailModal({
               <ImageCompare
                 originalSrc={convertFileSrc(image.temp_path)}
                 compressedSrc={preview?.compressed_preview_path ?? null}
-                originalSize={image.file_size}
+                originalSize={pdfImageSize(image)}
                 compressedSize={preview?.compressed_size ?? 0}
                 originalWidth={image.width}
                 originalHeight={image.height}

@@ -4,9 +4,9 @@ mod prune;
 mod remove_images;
 
 use analysis::PdfAnalysis;
-use compress_images::{CompressedImageEntry, CompressImagesResult, ExtractedImageInfo};
+use compress_images::{CompressImagesResult, CompressedImageEntry, ExtractedImageInfo};
 use prune::{PruneOptions, PruneResult};
-use remove_images::{RemoveImagesResult, ImageInfo, ImageSize};
+use remove_images::{ImageInfo, ImageSize, RemoveImagesResult};
 use std::sync::atomic::AtomicBool;
 use std::sync::Arc;
 use tauri::{AppHandle, Emitter};
@@ -105,10 +105,7 @@ async fn remove_images(
 }
 
 #[tauri::command]
-async fn list_images(
-    app: AppHandle,
-    input_path: String,
-) -> Result<Vec<ImageInfo>, String> {
+async fn list_images(app: AppHandle, input_path: String) -> Result<Vec<ImageInfo>, String> {
     let cancel = Arc::new(AtomicBool::new(false));
     let progress_app = app.clone();
 

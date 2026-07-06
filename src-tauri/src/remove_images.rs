@@ -47,12 +47,15 @@ pub fn list_images(
     cancel: Arc<AtomicBool>,
 ) -> Result<Vec<ImageInfo>, String> {
     progress(5, "正在加载 PDF 文件...");
-    if cancel.load(Ordering::Relaxed) { return Err("已取消".to_string()); }
+    if cancel.load(Ordering::Relaxed) {
+        return Err("已取消".to_string());
+    }
 
-    let doc = Document::load(input_path)
-        .map_err(|e| format!("无法加载PDF文件: {}", e))?;
+    let doc = Document::load(input_path).map_err(|e| format!("无法加载PDF文件: {}", e))?;
 
-    if cancel.load(Ordering::Relaxed) { return Err("已取消".to_string()); }
+    if cancel.load(Ordering::Relaxed) {
+        return Err("已取消".to_string());
+    }
     progress(20, "正在解析页面结构...");
 
     let pages: Vec<(u32, ObjectId)> = doc.get_pages().into_iter().collect();
@@ -65,7 +68,9 @@ pub fn list_images(
     let mut images: Vec<ImageInfo> = Vec::new();
 
     for (page_idx, (page_num, page_id)) in pages.iter().enumerate() {
-        if cancel.load(Ordering::Relaxed) { return Err("已取消".to_string()); }
+        if cancel.load(Ordering::Relaxed) {
+            return Err("已取消".to_string());
+        }
         let pct = 20 + ((page_idx * 70) / total_pages.max(1));
         progress(pct as u8, &format!("正在扫描第 {} 页...", page_num));
 
@@ -131,65 +136,83 @@ pub fn list_images(
         let mut op_history: Vec<String> = Vec::new();
 
         for op in &content.operations {
-                let op_str = format!("{} {}", op.operands.iter().map(|o| match o {
-                    Object::Integer(i) => i.to_string(),
-                    Object::Real(r) => r.to_string(),
-                    Object::Name(n) => format!("/{}", String::from_utf8_lossy(n)),
-                    _ => "?".to_string(),
-                }).collect::<Vec<_>>().join(" "), op.operator);
+            let op_str = format!(
+                "{} {}",
+                op.operands
+                    .iter()
+                    .map(|o| match o {
+                        Object::Integer(i) => i.to_string(),
+                        Object::Real(r) => r.to_string(),
+                        Object::Name(n) => format!("/{}", String::from_utf8_lossy(n)),
+                        _ => "?".to_string(),
+                    })
+                    .collect::<Vec<_>>()
+                    .join(" "),
+                op.operator
+            );
 
-                match op.operator.as_str() {
-                    "q" => {
-                        ctm_stack.push(ctm);
-                        op_history.push(op_str);
-                    }
-                    "Q" => {
-                        if let Some(prev) = ctm_stack.pop() {
-                            ctm = prev;
-                        }
-                        op_history.push(op_str);
-                    }
-                    "cm" => {
-                        if op.operands.len() == 6 {
-                            let vals: Vec<f64> = op.operands.iter().filter_map(obj_to_f64).collect();
-                            if vals.len() == 6 {
-                                let transform = Matrix {
-                                    a: vals[0], b: vals[1], c: vals[2],
-                                    d: vals[3], e: vals[4], f: vals[5],
-                                };
-                                ctm = transform.prepend(&ctm);
-                            }
-                        }
-                        op_history.push(op_str);
-                    }
-                    "Do" => {
-                        if op.operands.len() == 1 {
-                            if let Object::Name(name) = &op.operands[0] {
-                                if let Some((id, w, h)) = all_images.get(name.as_slice()) {
-                                    images.push(ImageInfo {
-                                        page: *page_num,
-                                        name: String::from_utf8_lossy(name).to_string(),
-                                        width: *w,
-                                        height: *h,
-                                        x: ctm.e,
-                                        y: ctm.f,
-                                        object_id: format!("{} {}", id.0, id.1),
-                                        ctm_a: ctm.a,
-                                        ctm_b: ctm.b,
-                                        ctm_c: ctm.c,
-                                        ctm_d: ctm.d,
-                                        ctm_e: ctm.e,
-                                        ctm_f: ctm.f,
-                                        mediabox: mediabox.clone(),
-                                        raw_ops: op_history.iter().rev().take(10).rev().cloned().collect(),
-                                    });
-                                }
-                            }
-                        }
-                    }
-                    _ => {}
+            match op.operator.as_str() {
+                "q" => {
+                    ctm_stack.push(ctm);
+                    op_history.push(op_str);
                 }
+                "Q" => {
+                    if let Some(prev) = ctm_stack.pop() {
+                        ctm = prev;
+                    }
+                    op_history.push(op_str);
+                }
+                "cm" => {
+                    if op.operands.len() == 6 {
+                        let vals: Vec<f64> = op.operands.iter().filter_map(obj_to_f64).collect();
+                        if vals.len() == 6 {
+                            let transform = Matrix {
+                                a: vals[0],
+                                b: vals[1],
+                                c: vals[2],
+                                d: vals[3],
+                                e: vals[4],
+                                f: vals[5],
+                            };
+                            ctm = transform.prepend(&ctm);
+                        }
+                    }
+                    op_history.push(op_str);
+                }
+                "Do" => {
+                    if op.operands.len() == 1 {
+                        if let Object::Name(name) = &op.operands[0] {
+                            if let Some((id, w, h)) = all_images.get(name.as_slice()) {
+                                images.push(ImageInfo {
+                                    page: *page_num,
+                                    name: String::from_utf8_lossy(name).to_string(),
+                                    width: *w,
+                                    height: *h,
+                                    x: ctm.e,
+                                    y: ctm.f,
+                                    object_id: format!("{} {}", id.0, id.1),
+                                    ctm_a: ctm.a,
+                                    ctm_b: ctm.b,
+                                    ctm_c: ctm.c,
+                                    ctm_d: ctm.d,
+                                    ctm_e: ctm.e,
+                                    ctm_f: ctm.f,
+                                    mediabox: mediabox.clone(),
+                                    raw_ops: op_history
+                                        .iter()
+                                        .rev()
+                                        .take(10)
+                                        .rev()
+                                        .cloned()
+                                        .collect(),
+                                });
+                            }
+                        }
+                    }
+                }
+                _ => {}
             }
+        }
     }
 
     progress(100, "完成");
@@ -208,7 +231,14 @@ struct Matrix {
 
 impl Matrix {
     fn identity() -> Self {
-        Matrix { a: 1.0, b: 0.0, c: 0.0, d: 1.0, e: 0.0, f: 0.0 }
+        Matrix {
+            a: 1.0,
+            b: 0.0,
+            c: 0.0,
+            d: 1.0,
+            e: 0.0,
+            f: 0.0,
+        }
     }
 
     // PDF spec: cm operator sets CTM' = M × CTM (M is prepended)
@@ -256,7 +286,9 @@ fn get_xobject_dict<'a>(doc: &'a Document, page_id: ObjectId) -> Option<&'a Dict
                     if let Ok(xobj) = rd.get(b"XObject") {
                         let xobj_dict = match xobj {
                             Object::Dictionary(d) => Some(d),
-                            Object::Reference(id) => doc.get_object(*id).and_then(Object::as_dict).ok(),
+                            Object::Reference(id) => {
+                                doc.get_object(*id).and_then(Object::as_dict).ok()
+                            }
                             _ => None,
                         };
                         if let Some(xd) = xobj_dict {
@@ -276,11 +308,16 @@ fn get_xobject_dict<'a>(doc: &'a Document, page_id: ObjectId) -> Option<&'a Dict
     None
 }
 
-
 fn is_image_stream(stream: &Stream) -> bool {
-    stream.dict.get(b"Subtype")
+    stream
+        .dict
+        .get(b"Subtype")
         .map(|v| {
-            if let Object::Name(n) = v { n.as_slice() == b"Image" } else { false }
+            if let Object::Name(n) = v {
+                n.as_slice() == b"Image"
+            } else {
+                false
+            }
         })
         .unwrap_or(false)
 }
@@ -307,12 +344,15 @@ pub fn remove_images_by_criteria(
         .len() as usize;
 
     progress(5, "正在加载 PDF 文件...");
-    if cancel.load(Ordering::Relaxed) { return Err("已取消".to_string()); }
+    if cancel.load(Ordering::Relaxed) {
+        return Err("已取消".to_string());
+    }
 
-    let mut doc = Document::load(input_path)
-        .map_err(|e| format!("无法加载PDF文件: {}", e))?;
+    let mut doc = Document::load(input_path).map_err(|e| format!("无法加载PDF文件: {}", e))?;
 
-    if cancel.load(Ordering::Relaxed) { return Err("已取消".to_string()); }
+    if cancel.load(Ordering::Relaxed) {
+        return Err("已取消".to_string());
+    }
     progress(20, "正在解析页面结构...");
 
     let pages: Vec<(u32, ObjectId)> = doc.get_pages().into_iter().collect();
@@ -328,9 +368,14 @@ pub fn remove_images_by_criteria(
     let mut removed_image_ids: Vec<ObjectId> = Vec::new();
 
     for (page_idx, (page_num, page_id)) in pages.iter().enumerate() {
-        if cancel.load(Ordering::Relaxed) { return Err("已取消".to_string()); }
+        if cancel.load(Ordering::Relaxed) {
+            return Err("已取消".to_string());
+        }
         let pct = 20 + ((page_idx * 70) / total_pages.max(1));
-        progress(pct as u8, &format!("正在处理第 {} 页 (共 {} 页)...", page_num, total_pages));
+        progress(
+            pct as u8,
+            &format!("正在处理第 {} 页 (共 {} 页)...", page_num, total_pages),
+        );
 
         // Get XObject dictionary for this page
         let xobject_dict = get_xobject_dict(&doc, *page_id);
@@ -385,73 +430,78 @@ pub fn remove_images_by_criteria(
         let mut removed_in_this_stream = 0usize;
 
         for op in &content.operations {
-                match op.operator.as_str() {
-                    "q" => {
-                        ctm_stack.push(ctm);
-                        new_operations.push(op.clone());
+            match op.operator.as_str() {
+                "q" => {
+                    ctm_stack.push(ctm);
+                    new_operations.push(op.clone());
+                }
+                "Q" => {
+                    if let Some(prev) = ctm_stack.pop() {
+                        ctm = prev;
                     }
-                    "Q" => {
-                        if let Some(prev) = ctm_stack.pop() {
-                            ctm = prev;
+                    new_operations.push(op.clone());
+                }
+                "cm" => {
+                    if op.operands.len() == 6 {
+                        let vals: Vec<f64> = op.operands.iter().filter_map(obj_to_f64).collect();
+                        if vals.len() == 6 {
+                            let transform = Matrix {
+                                a: vals[0],
+                                b: vals[1],
+                                c: vals[2],
+                                d: vals[3],
+                                e: vals[4],
+                                f: vals[5],
+                            };
+                            // PDF spec: CTM' = M × CTM (prepend)
+                            ctm = transform.prepend(&ctm);
                         }
-                        new_operations.push(op.clone());
                     }
-                    "cm" => {
-                        if op.operands.len() == 6 {
-                            let vals: Vec<f64> = op.operands.iter().filter_map(obj_to_f64).collect();
-                            if vals.len() == 6 {
-                                let transform = Matrix {
-                                    a: vals[0], b: vals[1], c: vals[2],
-                                    d: vals[3], e: vals[4], f: vals[5],
-                                };
-                                // PDF spec: CTM' = M × CTM (prepend)
-                                ctm = transform.prepend(&ctm);
-                            }
-                        }
-                        new_operations.push(op.clone());
-                    }
-                    "Do" => {
-                        // Check if this Do references a matching image
-                        let should_remove = if op.operands.len() == 1 {
-                            if let Object::Name(name) = &op.operands[0] {
-                                if matching_images.contains_key(name.as_slice()) {
-                                    // Y position is the f component of current CTM
-                                    let y = ctm.f;
-                                    y >= y_min && y <= y_max
-                                } else {
-                                    false
-                                }
+                    new_operations.push(op.clone());
+                }
+                "Do" => {
+                    // Check if this Do references a matching image
+                    let should_remove = if op.operands.len() == 1 {
+                        if let Object::Name(name) = &op.operands[0] {
+                            if matching_images.contains_key(name.as_slice()) {
+                                // Y position is the f component of current CTM
+                                let y = ctm.f;
+                                y >= y_min && y <= y_max
                             } else {
                                 false
                             }
                         } else {
                             false
-                        };
-
-                        if should_remove {
-                            removed_in_this_stream += 1;
-                            if let Object::Name(name) = &op.operands[0] {
-                                if let Some((img_id, w, h)) = matching_images.get(name.as_slice()) {
-                                    removed_image_ids.push(*img_id);
-                                    actions.push(format!(
-                                        "第 {} 页: 移除图片 /{} ({}×{}px, Y={:.1})",
-                                        page_num,
-                                        String::from_utf8_lossy(name),
-                                        w, h,
-                                        ctm.f
-                                    ));
-                                }
-                            }
-                            // Skip this operation (don't add to new_operations)
-                        } else {
-                            new_operations.push(op.clone());
                         }
-                    }
-                    _ => {
+                    } else {
+                        false
+                    };
+
+                    if should_remove {
+                        removed_in_this_stream += 1;
+                        if let Object::Name(name) = &op.operands[0] {
+                            if let Some((img_id, w, h)) = matching_images.get(name.as_slice()) {
+                                removed_image_ids.push(*img_id);
+                                actions.push(format!(
+                                    "第 {} 页: 移除图片 /{} ({}×{}px, Y={:.1})",
+                                    page_num,
+                                    String::from_utf8_lossy(name),
+                                    w,
+                                    h,
+                                    ctm.f
+                                ));
+                            }
+                        }
+                        // Skip this operation (don't add to new_operations)
+                    } else {
                         new_operations.push(op.clone());
                     }
                 }
+                _ => {
+                    new_operations.push(op.clone());
+                }
             }
+        }
 
         let mut page_modified = false;
         if removed_in_this_stream > 0 {
@@ -459,8 +509,11 @@ pub fn remove_images_by_criteria(
             images_removed += removed_in_this_stream;
 
             // Re-encode content and write back to the first content stream
-            let new_content = Content { operations: new_operations };
-            let encoded = new_content.encode()
+            let new_content = Content {
+                operations: new_operations,
+            };
+            let encoded = new_content
+                .encode()
                 .map_err(|e| format!("编码内容流失败 (页 {}): {}", page_num, e))?;
 
             // Write to first content stream, clear the rest
@@ -486,7 +539,9 @@ pub fn remove_images_by_criteria(
         }
     }
 
-    if cancel.load(Ordering::Relaxed) { return Err("已取消".to_string()); }
+    if cancel.load(Ordering::Relaxed) {
+        return Err("已取消".to_string());
+    }
     progress(92, "正在清理图片对象...");
 
     // Remove unused image objects (deduplicate first)
@@ -505,8 +560,7 @@ pub fn remove_images_by_criteria(
         .map_err(|e| format!("保存PDF失败: {}", e))?;
 
     // Atomic rename
-    std::fs::rename(&tmp_path, output_path)
-        .map_err(|e| format!("重命名文件失败: {}", e))?;
+    std::fs::rename(&tmp_path, output_path).map_err(|e| format!("重命名文件失败: {}", e))?;
 
     let output_size = Path::new(output_path)
         .metadata()
