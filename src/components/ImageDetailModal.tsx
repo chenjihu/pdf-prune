@@ -21,6 +21,8 @@ import { ImageCompare } from "./ImageCompare";
 
 const RAW_FORMAT_HELP =
   "raw 表示这张图是 PDF 内部的原始图像数据或特殊编码流，不是可直接保存的 JPEG/PNG/WebP。它通常需要结合宽高、颜色空间、位深和 DecodeParms 才能还原，部分 raw 图片可能无法压缩。";
+const PDF_SIZE_HELP =
+  "PDF 大小表示这张图片在 PDF 内部原始图片流中占用的空间。它可能远小于提取出来的 PNG/JPEG 临时文件；导出时会按这个内部流大小判断是否值得替换。";
 
 function pdfImageSize(image: ExtractedImageInfo): number {
   return image.pdf_size ?? image.file_size;
@@ -41,6 +43,23 @@ function ImageFormatBadge({ format }: { format: string }) {
       />
       <span className="pointer-events-none absolute left-0 top-full z-20 mt-2 hidden w-72 rounded-lg border border-neutral-700 bg-neutral-950 p-3 text-left text-xs leading-relaxed text-neutral-300 shadow-xl group-hover:block group-focus-within:block">
         {RAW_FORMAT_HELP}
+      </span>
+    </span>
+  );
+}
+
+function PdfSizeHelp() {
+  return (
+    <span className="relative group inline-flex items-center">
+      <button
+        type="button"
+        className="text-[10px] text-neutral-500 underline decoration-dotted underline-offset-2 hover:text-neutral-300 focus:outline-none focus:text-neutral-300"
+        aria-label={PDF_SIZE_HELP}
+      >
+        解释
+      </button>
+      <span className="pointer-events-none absolute left-1/2 top-full z-20 mt-2 hidden w-72 -translate-x-1/2 rounded-lg border border-neutral-700 bg-neutral-950 p-3 text-left text-xs leading-relaxed text-neutral-300 shadow-xl group-hover:block group-focus-within:block">
+        {PDF_SIZE_HELP}
       </span>
     </span>
   );
@@ -334,7 +353,10 @@ export function ImageDetailModal({
                 {preview && (
                   <div className="grid grid-cols-3 gap-3 pt-1">
                     <div className="text-center p-3 rounded-lg bg-neutral-800/50">
-                      <div className="text-xs text-neutral-500">原始大小</div>
+                      <div className="flex items-center justify-center gap-1 text-xs text-neutral-500">
+                        <span>PDF 原始大小</span>
+                        <PdfSizeHelp />
+                      </div>
                       <div className="text-sm font-bold font-mono">
                         {formatKB(preview.original_size)}
                       </div>

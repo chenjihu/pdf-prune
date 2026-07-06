@@ -85,6 +85,8 @@ const DEFAULT_FILTERS: FilterState = {
 const IMAGE_LIST_PAGE_SIZE = 120;
 const RAW_FORMAT_HELP =
   "raw 表示这张图是 PDF 内部的原始图像数据或特殊编码流，不是可直接保存的 JPEG/PNG/WebP。它通常需要结合宽高、颜色空间、位深和 DecodeParms 才能还原，部分 raw 图片可能无法压缩。";
+const PDF_SIZE_HELP =
+  "PDF 大小表示这张图片在 PDF 内部原始图片流中占用的空间。它可能远小于提取出来的 PNG/JPEG 临时文件；导出时会按这个内部流大小判断是否值得替换。";
 
 function pdfImageSize(image: ExtractedImageInfo): number {
   return image.pdf_size ?? image.file_size;
@@ -162,6 +164,23 @@ function ImageFormatBadge({ format }: { format: string }) {
       />
       <span className="pointer-events-none absolute right-0 top-full z-20 mt-2 hidden w-64 rounded-lg border border-neutral-700 bg-neutral-950 p-3 text-left text-xs leading-relaxed text-neutral-300 shadow-xl group-hover:block group-focus-within:block">
         {RAW_FORMAT_HELP}
+      </span>
+    </span>
+  );
+}
+
+function PdfSizeHelp() {
+  return (
+    <span className="relative group inline-flex items-center">
+      <button
+        type="button"
+        className="text-[10px] text-neutral-500 underline decoration-dotted underline-offset-2 hover:text-neutral-300 focus:outline-none focus:text-neutral-300"
+        aria-label={PDF_SIZE_HELP}
+      >
+        解释
+      </button>
+      <span className="pointer-events-none absolute left-0 bottom-full z-20 mb-2 hidden w-64 rounded-lg border border-neutral-700 bg-neutral-950 p-3 text-left text-xs leading-relaxed text-neutral-300 shadow-xl group-hover:block group-focus-within:block">
+        {PDF_SIZE_HELP}
       </span>
     </span>
   );
@@ -962,8 +981,9 @@ export function CompressImagesTab({
                         </div>
                       )}
                       <div className="flex items-center justify-between">
-                        <span className="text-neutral-500" title={`提取文件: ${formatKB(img.file_size)}`}>
-                          PDF {formatKB(pdfImageSize(img))}
+                        <span className="inline-flex items-center gap-1 text-neutral-500" title={`提取文件: ${formatKB(img.file_size)}`}>
+                          <span>PDF {formatKB(pdfImageSize(img))}</span>
+                          <PdfSizeHelp />
                         </span>
                         {preview && (
                           <span className="text-green-400">
