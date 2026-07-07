@@ -134,6 +134,7 @@ export interface CompressedImageEntry {
   format: string;
   width: number;
   height: number;
+  original_size?: number;
 }
 
 export interface CompressImagesResult {

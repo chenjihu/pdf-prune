@@ -173,6 +173,13 @@ async fn get_default_cache_dir() -> Result<String, String> {
 }
 
 #[tauri::command]
+async fn get_file_size(file_path: String) -> Result<usize, String> {
+    std::fs::metadata(&file_path)
+        .map(|m| m.len() as usize)
+        .map_err(|e| format!("无法读取文件大小: {}", e))
+}
+
+#[tauri::command]
 async fn write_cache_file(
     cache_dir: Option<String>,
     filename: String,
@@ -235,6 +242,7 @@ pub fn run() {
             list_images,
             extract_images,
             get_default_cache_dir,
+            get_file_size,
             write_cache_file,
             clear_cache_dir,
             write_compressed_images

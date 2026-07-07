@@ -119,6 +119,10 @@ function pdfImageSize(image: ExtractedImageInfo): number {
   return image.pdf_size ?? image.file_size;
 }
 
+function compressedSavings(preview: CompressedImagePreview): number {
+  return Math.max(0, preview.original_size - preview.compressed_size);
+}
+
 function getDefaultExtractThreads(): number {
   const hardwareThreads = navigator.hardwareConcurrency || 4;
   return Math.min(8, Math.max(1, hardwareThreads));
@@ -247,9 +251,12 @@ export function CompressImagesTab({
   const [detailImageId, setDetailImageId] = useState<string | null>(null);
   const [exporting, setExporting] = useState(false);
   const [exportProgress, setExportProgress] = useState<{ pct: number; msg: string } | null>(null);
+  const [exportStartedAt, setExportStartedAt] = useState<number | null>(null);
+  const [exportElapsedSeconds, setExportElapsedSeconds] = useState(0);
   const [exportResult, setExportResult] = useState<CompressImagesResult | null>(null);
   const [exportError, setExportError] = useState<string | null>(null);
   const [compressError, setCompressError] = useState<string | null>(null);
+  const [pdfFileSize, setPdfFileSize] = useState<number | null>(null);
   const [pageSize, setPageSize] = useState(50);
   const [currentPage, setCurrentPage] = useState(1);
   const [extractThreadCount, setExtractThreadCount] = useState(getDefaultExtractThreads);
@@ -264,6 +271,33 @@ export function CompressImagesTab({
     }).then((fn) => { unlisten = fn; });
     return () => { unlisten?.(); };
   }, []);
+
+  useEffect(() => {
+    if (!exporting || exportStartedAt === null) return;
+    setExportElapsedSeconds(Math.floor((Date.now() - exportStartedAt) / 1000));
+    const timer = window.setInterval(() => {
+      setExportElapsedSeconds(Math.floor((Date.now() - exportStartedAt) / 1000));
+    }, 1000);
+    return () => window.clearInterval(timer);
+  }, [exporting, exportStartedAt]);
+
+  useEffect(() => {
+    let cancelled = false;
+    setPdfFileSize(null);
+    if (!inputPath) return;
+
+    invoke<number>("get_file_size", { filePath: inputPath })
+      .then((size) => {
+        if (!cancelled) setPdfFileSize(size);
+      })
+      .catch(() => {
+        if (!cancelled) setPdfFileSize(null);
+      });
+
+    return () => {
+      cancelled = true;
+    };
+  }, [inputPath]);
 
   // Filtered images
   const filteredImages = useMemo(() => {
@@ -403,12 +437,12 @@ export function CompressImagesTab({
           width: result.width,
           height: result.height,
         });
+        setCompressedPreviews(new Map(previews));
       } catch (e) {
         setCompressError(`图片 ${img.name} 压缩失败: ${String(e)}`);
       }
     }
 
-    setCompressedPreviews(previews);
     setCompressing(false);
     setCompressProgress(null);
   }, [extractedImages, selectedIds, compressFormat, quality, scale, maxWidth, colorReduction, binaryThreshold, cacheDir]);
@@ -427,6 +461,8 @@ export function CompressImagesTab({
       setExportError(null);
       setExportResult(null);
       setExportProgress({ pct: 0, msg: "准备中..." });
+      setExportStartedAt(Date.now());
+      setExportElapsedSeconds(0);
 
       const entries: CompressedImageEntry[] = [];
       for (const [id, preview] of compressedPreviews) {
@@ -438,6 +474,7 @@ export function CompressImagesTab({
           format: preview.format,
           width: preview.width,
           height: preview.height,
+          original_size: pdfImageSize(img),
         });
       }
 
@@ -452,6 +489,7 @@ export function CompressImagesTab({
     } finally {
       setExporting(false);
       setExportProgress(null);
+      setExportStartedAt(null);
     }
   }, [inputPath, compressedPreviews, extractedImages]);
 
@@ -483,6 +521,24 @@ export function CompressImagesTab({
     }
     return sum;
   }, [compressedPreviews]);
+
+  const totalEstimatedSavings = useMemo(() => {
+    let sum = 0;
+    for (const preview of compressedPreviews.values()) {
+      sum += compressedSavings(preview);
+    }
+    return sum;
+  }, [compressedPreviews]);
+
+  const estimatedPdfSize = useMemo(() => {
+    if (pdfFileSize === null) return null;
+    return Math.max(0, pdfFileSize - totalEstimatedSavings);
+  }, [pdfFileSize, totalEstimatedSavings]);
+
+  const estimatedPdfSavingsPercent = useMemo(() => {
+    if (!pdfFileSize || totalEstimatedSavings <= 0) return 0;
+    return Math.min(100, (totalEstimatedSavings / pdfFileSize) * 100);
+  }, [pdfFileSize, totalEstimatedSavings]);
 
   const handleDetailCompressed = useCallback((id: string, preview: CompressedImagePreview) => {
     setCompressedPreviews((prev) => {
@@ -541,6 +597,9 @@ export function CompressImagesTab({
             </p>
             <p className="text-neutral-500 text-xs mt-1">
               正在将压缩图片回写 PDF
+            </p>
+            <p className="text-neutral-500 text-xs mt-1">
+              已用时 {formatDuration(exportElapsedSeconds)}
             </p>
           </div>
           <div className="w-full">
@@ -792,7 +851,7 @@ export function CompressImagesTab({
       )}
 
       {/* Header stats */}
-      <div className="grid grid-cols-3 gap-3">
+      <div className="grid grid-cols-2 lg:grid-cols-4 gap-3">
         <div className="rounded-xl bg-neutral-800/30 p-3 text-center">
           <div className="text-xs text-neutral-500">图片总数</div>
           <div className="text-lg font-bold font-mono">{extractedImages?.length ?? 0}</div>
@@ -804,6 +863,17 @@ export function CompressImagesTab({
         <div className="rounded-xl bg-neutral-800/30 p-3 text-center">
           <div className="text-xs text-neutral-500">已选中</div>
           <div className="text-lg font-bold font-mono text-orange-400">{selectedIds.size}</div>
+        </div>
+        <div className="rounded-xl bg-neutral-800/30 p-3 text-center">
+          <div className="text-xs text-neutral-500">PDF 预估体积</div>
+          <div className="text-lg font-bold font-mono text-green-400">
+            {estimatedPdfSize !== null ? formatSize(estimatedPdfSize) : "未知"}
+          </div>
+          {totalEstimatedSavings > 0 && (
+            <div className="text-[11px] text-neutral-500">
+              已减少 {formatSize(totalEstimatedSavings)}
+            </div>
+          )}
         </div>
       </div>
 
@@ -1099,14 +1169,17 @@ export function CompressImagesTab({
                 {visibleImages.map((img) => {
                   const isSelected = selectedIds.has(img.id);
                   const preview = compressedPreviews.get(img.id);
+                  const saving = preview ? compressedSavings(preview) : 0;
                   return (
                     <div
                       key={img.id}
                       className={`relative rounded-lg border p-2 transition-colors ${
                         !img.supported
                           ? "bg-neutral-900/50 border-neutral-800 opacity-60 cursor-not-allowed"
-                          : isSelected
+                        : isSelected
                           ? "bg-blue-950/30 border-blue-700/50 cursor-pointer"
+                        : preview
+                          ? "bg-green-950/20 border-green-700/50 hover:border-green-600 cursor-pointer"
                           : "bg-neutral-800/50 border-neutral-700/50 hover:border-neutral-600 cursor-pointer"
                       }`}
                       onClick={() => toggleSelect(img.id)}
@@ -1124,6 +1197,11 @@ export function CompressImagesTab({
                             setDetailImageId(img.id);
                           }}
                         />
+                        {preview && (
+                          <div className="absolute top-1 left-1 px-1.5 py-0.5 rounded bg-green-600/90 text-white text-[10px] font-medium">
+                            已压缩
+                          </div>
+                        )}
                         {!img.supported && (
                           <div className="absolute inset-0 flex items-center justify-center">
                             <span className="px-2 py-0.5 rounded bg-black/70 text-neutral-300 text-[10px] font-medium">
@@ -1177,11 +1255,14 @@ export function CompressImagesTab({
                             <PdfSizeHelp />
                           </span>
                           {preview && (
-                            <span className="inline-flex items-center gap-1 text-green-400">
-                              <span>
+                            <span className={`inline-flex items-center gap-1 ${saving > 0 ? "text-green-400" : "text-amber-300"}`}>
+                              <span className="text-right">
                                 {formatKB(preview.compressed_size)}
                                 <span className="text-neutral-500 ml-1">
                                   ({compressionRatio(preview.original_size, preview.compressed_size)})
+                                </span>
+                                <span className="block text-[10px] leading-tight">
+                                  {saving > 0 ? `节省 ${formatKB(saving)}` : "预计不替换"}
                                 </span>
                               </span>
                               <button
@@ -1342,19 +1423,42 @@ export function CompressImagesTab({
 
           {/* Compression summary */}
           {compressedPreviews.size > 0 && (
-            <div className="grid grid-cols-3 gap-3">
-              <div className="text-center p-3 rounded-lg bg-neutral-800/50">
-                <div className="text-xs text-neutral-500">已压缩</div>
-                <div className="text-sm font-bold font-mono text-blue-400">{compressedPreviews.size}</div>
+            <div className="space-y-3">
+              <div className="grid grid-cols-3 gap-3">
+                <div className="text-center p-3 rounded-lg bg-neutral-800/50">
+                  <div className="text-xs text-neutral-500">已压缩</div>
+                  <div className="text-sm font-bold font-mono text-blue-400">{compressedPreviews.size}</div>
+                </div>
+                <div className="text-center p-3 rounded-lg bg-neutral-800/50">
+                  <div className="text-xs text-neutral-500">原始总大小</div>
+                  <div className="text-sm font-bold font-mono">{formatKB(totalOriginalSize)}</div>
+                </div>
+                <div className="text-center p-3 rounded-lg bg-neutral-800/50">
+                  <div className="text-xs text-neutral-500">压缩后</div>
+                  <div className="text-sm font-bold font-mono text-green-400">
+                    {formatKB(totalCompressedSize)}
+                  </div>
+                </div>
               </div>
-              <div className="text-center p-3 rounded-lg bg-neutral-800/50">
-                <div className="text-xs text-neutral-500">原始总大小</div>
-                <div className="text-sm font-bold font-mono">{formatKB(totalOriginalSize)}</div>
-              </div>
-              <div className="text-center p-3 rounded-lg bg-neutral-800/50">
-                <div className="text-xs text-neutral-500">压缩后</div>
-                <div className="text-sm font-bold font-mono text-green-400">
-                  {formatKB(totalCompressedSize)}
+              <div className="rounded-lg bg-neutral-900/50 border border-neutral-800 p-3">
+                <div className="flex items-center justify-between text-xs text-neutral-500 mb-2">
+                  <span>PDF 预估体积</span>
+                  <span className="font-mono">
+                    {pdfFileSize !== null ? formatSize(pdfFileSize) : "未知"} →{" "}
+                    <span className="text-green-400">
+                      {estimatedPdfSize !== null ? formatSize(estimatedPdfSize) : "未知"}
+                    </span>
+                  </span>
+                </div>
+                <div className="h-2 rounded-full bg-neutral-800 overflow-hidden">
+                  <div
+                    className="h-full rounded-full bg-gradient-to-r from-green-500 to-cyan-500 transition-all duration-500 ease-out"
+                    style={{ width: `${estimatedPdfSavingsPercent}%` }}
+                  />
+                </div>
+                <div className="flex items-center justify-between text-[11px] text-neutral-500 mt-2">
+                  <span>预计节省 {formatSize(totalEstimatedSavings)}</span>
+                  <span>{estimatedPdfSavingsPercent.toFixed(1)}%</span>
                 </div>
               </div>
             </div>

@@ -2,12 +2,15 @@ use flate2::read::{DeflateDecoder, ZlibDecoder};
 use lopdf::{Dictionary, Document, Object, ObjectId, Stream};
 use rayon::prelude::*;
 use serde::{Deserialize, Serialize};
-use std::collections::HashSet;
+use serde_json::{json, Map, Value};
+use std::collections::{HashMap, HashSet};
 use std::io::{Cursor, Read};
 use std::path::Path;
 use std::process::Command;
+use std::sync::mpsc;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::Arc;
+use std::time::{Duration, Instant};
 
 const MAX_IMAGE_DECODE_THREADS: usize = 32;
 const HUGE_PREVIEW_PIXEL_COUNT: u64 = 24_000_000;
@@ -37,6 +40,7 @@ pub struct CompressedImageEntry {
     pub format: String,
     pub width: u32,
     pub height: u32,
+    pub original_size: Option<usize>,
 }
 
 #[derive(Debug, Serialize, Clone, Deserialize)]
@@ -53,6 +57,25 @@ fn file_size(path: &str) -> usize {
         .metadata()
         .map(|m| m.len() as usize)
         .unwrap_or(0)
+}
+
+fn file_size_label(bytes: usize) -> String {
+    if bytes < 1024 {
+        format!("{} B", bytes)
+    } else if bytes < 1024 * 1024 {
+        format!("{:.1} KB", bytes as f64 / 1024.0)
+    } else {
+        format!("{:.2} MB", bytes as f64 / (1024.0 * 1024.0))
+    }
+}
+
+fn elapsed_label(start: Instant) -> String {
+    let secs = start.elapsed().as_secs();
+    if secs < 60 {
+        format!("{}秒", secs)
+    } else {
+        format!("{}分{}秒", secs / 60, secs % 60)
+    }
 }
 
 fn optimize_pdf_object_streams(input_path: &str, output_path: &str) -> Result<(), String> {
@@ -87,6 +110,12 @@ fn optimize_pdf_object_streams(input_path: &str, output_path: &str) -> Result<()
     ))
 }
 
+fn find_qpdf_binary() -> Option<&'static str> {
+    ["qpdf", "/opt/homebrew/bin/qpdf", "/usr/local/bin/qpdf"]
+        .into_iter()
+        .find(|cmd| Command::new(cmd).arg("--version").output().is_ok())
+}
+
 fn is_grayscale_pixels(rgb: &[u8]) -> bool {
     rgb.chunks_exact(3)
         .all(|px| px[0] == px[1] && px[1] == px[2])
@@ -115,6 +144,16 @@ fn pack_binary_luma_pixels(luma: &[u8], width: u32, height: u32) -> Vec<u8> {
     }
 
     packed
+}
+
+fn parse_object_id(object_id: &str) -> Option<ObjectId> {
+    let parts: Vec<&str> = object_id.split_whitespace().collect();
+    if parts.len() != 2 {
+        return None;
+    }
+    let obj_num = parts[0].parse::<u32>().ok()?;
+    let gen_num = parts[1].parse::<u16>().ok()?;
+    Some((obj_num, gen_num))
 }
 
 fn obj_to_f64(obj: &Object) -> Option<f64> {
@@ -179,6 +218,282 @@ fn is_image_stream(stream: &Stream) -> bool {
             }
         })
         .unwrap_or(false)
+}
+
+fn keep_extract_images_object(object_id: ObjectId, object: &mut Object) -> Option<(ObjectId, Object)> {
+    if let Object::Stream(stream) = object {
+        if !is_image_stream(stream) && !stream.dict.has_type(b"ObjStm") {
+            return None;
+        }
+    }
+
+    Some((object_id, object.to_owned()))
+}
+
+#[derive(Debug, Clone)]
+struct PdfImagesRow {
+    page: u32,
+    num: usize,
+    width: u32,
+    height: u32,
+    color_space: String,
+    bpc: u8,
+    object_id: ObjectId,
+    pdf_size: usize,
+    encoding: String,
+}
+
+fn find_pdfimages_binary() -> Option<&'static str> {
+    ["pdfimages", "/opt/homebrew/bin/pdfimages", "/usr/local/bin/pdfimages"]
+        .into_iter()
+        .find(|cmd| Command::new(cmd).arg("-v").output().is_ok())
+}
+
+fn parse_pdfimages_size(value: &str) -> usize {
+    let trimmed = value.trim();
+    if trimmed.is_empty() {
+        return 0;
+    }
+
+    let split_at = trimmed
+        .find(|c: char| !(c.is_ascii_digit() || c == '.'))
+        .unwrap_or(trimmed.len());
+    let number = trimmed[..split_at].parse::<f64>().unwrap_or(0.0);
+    let unit = trimmed[split_at..].to_ascii_lowercase();
+    let multiplier = if unit.starts_with('g') {
+        1024.0 * 1024.0 * 1024.0
+    } else if unit.starts_with('m') {
+        1024.0 * 1024.0
+    } else if unit.starts_with('k') {
+        1024.0
+    } else {
+        1.0
+    };
+    (number * multiplier).round() as usize
+}
+
+fn parse_pdfimages_list(stdout: &str) -> Vec<PdfImagesRow> {
+    let mut seen = HashSet::new();
+    stdout
+        .lines()
+        .filter_map(|line| {
+            let cols: Vec<&str> = line.split_whitespace().collect();
+            if cols.len() < 16 || cols[2] != "image" {
+                return None;
+            }
+
+            let page = cols[0].parse::<u32>().ok()?;
+            let num = cols[1].parse::<usize>().ok()?;
+            let width = cols[3].parse::<u32>().ok()?;
+            let height = cols[4].parse::<u32>().ok()?;
+            let bpc = cols[7].parse::<u8>().ok()?;
+            let object_num = cols[10].parse::<u32>().ok()?;
+            let generation = cols[11].parse::<u16>().ok()?;
+            let object_id = (object_num, generation);
+            if !seen.insert(object_id) {
+                return None;
+            }
+
+            Some(PdfImagesRow {
+                page,
+                num,
+                width,
+                height,
+                color_space: cols[5].to_string(),
+                bpc,
+                object_id,
+                pdf_size: parse_pdfimages_size(cols[14]),
+                encoding: cols[8].to_string(),
+            })
+        })
+        .collect()
+}
+
+fn image_format_from_path(path: &Path) -> Option<String> {
+    match path.extension()?.to_string_lossy().to_ascii_lowercase().as_str() {
+        "jpg" | "jpeg" => Some("jpeg".to_string()),
+        "png" => Some("png".to_string()),
+        "webp" => Some("webp".to_string()),
+        _ => None,
+    }
+}
+
+fn extract_pdfimages_num_from_path(path: &Path) -> Option<usize> {
+    let stem = path.file_stem()?.to_string_lossy();
+    let last = stem.rsplit('-').next()?;
+    last.parse::<usize>().ok()
+}
+
+fn extract_images_with_pdfimages(
+    input_path: &str,
+    worker_threads: usize,
+    cache_dir: Option<&str>,
+    progress: &(impl Fn(u8, &str) + Sync),
+    detail_progress: &(impl Fn(u8, &str, usize, usize, usize, usize) + Sync),
+    cancel: &Arc<AtomicBool>,
+) -> Result<Vec<ExtractedImageInfo>, String> {
+    let pdfimages = find_pdfimages_binary().ok_or_else(|| "未找到 pdfimages".to_string())?;
+    let temp_dir = create_session_temp_dir(cache_dir)?;
+
+    progress(4, "正在用 Poppler 快速扫描 PDF 图片...");
+    detail_progress(
+        4,
+        "正在用 Poppler 快速扫描 PDF 图片...",
+        0,
+        0,
+        0,
+        worker_threads,
+    );
+    let list_output = Command::new(pdfimages)
+        .args(["-list", input_path])
+        .output()
+        .map_err(|e| format!("pdfimages 扫描失败: {}", e))?;
+    if cancel.load(Ordering::Relaxed) {
+        return Err("已取消".to_string());
+    }
+    if !list_output.status.success() {
+        return Err(format!(
+            "pdfimages 扫描失败: {}",
+            String::from_utf8_lossy(&list_output.stderr).trim()
+        ));
+    }
+
+    let rows = parse_pdfimages_list(&String::from_utf8_lossy(&list_output.stdout));
+    if rows.is_empty() {
+        return Err("pdfimages 未发现可处理图片".to_string());
+    }
+
+    let total = rows.len();
+    progress(20, &format!("已快速发现 {} 张图片，正在导出...", total));
+    detail_progress(
+        20,
+        &format!("已快速发现 {} 张图片，正在导出...", total),
+        0,
+        total,
+        worker_threads.min(total),
+        worker_threads,
+    );
+
+    let output_root = temp_dir.join("pdfimages_img");
+    let export_output = Command::new(pdfimages)
+        .args(["-png", "-j", "-p", "-print-filenames", input_path])
+        .arg(&output_root)
+        .output()
+        .map_err(|e| format!("pdfimages 导出失败: {}", e))?;
+    if cancel.load(Ordering::Relaxed) {
+        return Err("已取消".to_string());
+    }
+    if !export_output.status.success() {
+        return Err(format!(
+            "pdfimages 导出失败: {}",
+            String::from_utf8_lossy(&export_output.stderr).trim()
+        ));
+    }
+
+    let mut exported = HashMap::new();
+    for line in String::from_utf8_lossy(&export_output.stdout).lines() {
+        let path = Path::new(line.trim());
+        if path.exists() {
+            if let Some(num) = extract_pdfimages_num_from_path(path) {
+                exported.insert(num, path.to_path_buf());
+            }
+        }
+    }
+
+    progress(
+        25,
+        &format!("正在并行生成图片预览 (0/{}, {}线程)...", total, worker_threads),
+    );
+    detail_progress(
+        25,
+        &format!("正在并行生成图片预览 (0/{}, {}线程)...", total, worker_threads),
+        0,
+        total,
+        worker_threads.min(total),
+        worker_threads,
+    );
+
+    let done = AtomicUsize::new(0);
+    let pool = rayon::ThreadPoolBuilder::new()
+        .num_threads(worker_threads)
+        .thread_name(|idx| format!("pdf-prune-pdfimages-preview-{}", idx))
+        .build()
+        .map_err(|e| format!("创建 Poppler 预览线程池失败: {}", e))?;
+
+    let mut images: Vec<ExtractedImageInfo> = pool.install(|| {
+        rows.par_iter()
+            .filter_map(|row| {
+                if cancel.load(Ordering::Relaxed) {
+                    return None;
+                }
+
+                let temp_path = exported.get(&row.num)?;
+                let format = image_format_from_path(temp_path)?;
+                let preview_path = temp_dir.join(format!(
+                    "img_{}_{}_preview.png",
+                    row.object_id.0, row.object_id.1
+                ));
+                let data = std::fs::read(temp_path).ok()?;
+                if make_preview_or_placeholder(row.width, row.height, &data, 400, &preview_path).is_err() {
+                    let _ = make_placeholder_preview(row.width, row.height, &preview_path);
+                }
+
+                let n = done.fetch_add(1, Ordering::Relaxed) + 1;
+                let pct = 25 + ((n * 70) / total.max(1));
+                let active = worker_threads.min(total.saturating_sub(n));
+                progress(
+                    pct.min(99) as u8,
+                    &format!("正在并行生成图片预览 ({}/{}, {}线程)...", n, total, worker_threads),
+                );
+                detail_progress(
+                    pct.min(99) as u8,
+                    &format!("正在并行生成图片预览 ({}/{}, {}线程)...", n, total, worker_threads),
+                    n,
+                    total,
+                    active,
+                    worker_threads,
+                );
+
+                let id_str = format!("{} {}", row.object_id.0, row.object_id.1);
+                Some(ExtractedImageInfo {
+                    id: id_str.clone(),
+                    page: row.page,
+                    name: format!("Im{} ({})", row.num, row.encoding),
+                    object_id: id_str,
+                    width: row.width,
+                    height: row.height,
+                    file_size: data.len(),
+                    pdf_size: row.pdf_size,
+                    format,
+                    color_space: row.color_space.clone(),
+                    bits_per_component: row.bpc,
+                    temp_path: temp_path.to_string_lossy().to_string(),
+                    preview_path: preview_path.to_string_lossy().to_string(),
+                    supported: true,
+                })
+            })
+            .collect()
+    });
+
+    if cancel.load(Ordering::Relaxed) {
+        return Err("已取消".to_string());
+    }
+
+    if images.is_empty() {
+        return Err("pdfimages 导出了文件，但没有可压缩的 PNG/JPEG 图片".to_string());
+    }
+
+    images.sort_by(|a, b| a.page.cmp(&b.page).then_with(|| a.id.cmp(&b.id)));
+    progress(100, &format!("完成，共提取 {} 张图片", images.len()));
+    detail_progress(
+        100,
+        &format!("完成，共提取 {} 张图片", images.len()),
+        images.len(),
+        images.len(),
+        0,
+        worker_threads,
+    );
+    Ok(images)
 }
 
 fn get_image_dimensions(stream: &Stream) -> Option<(u32, u32)> {
@@ -841,18 +1156,48 @@ pub fn extract_images(
     detail_progress: impl Fn(u8, &str, usize, usize, usize, usize) + Sync,
     cancel: Arc<AtomicBool>,
 ) -> Result<Vec<ExtractedImageInfo>, String> {
-    progress(5, "正在加载 PDF 文件...");
+    let worker_threads = normalize_worker_threads(worker_threads);
+    let input_size = file_size(input_path);
+
+    match extract_images_with_pdfimages(
+        input_path,
+        worker_threads,
+        cache_dir,
+        &progress,
+        &detail_progress,
+        &cancel,
+    ) {
+        Ok(images) => return Ok(images),
+        Err(e) if e == "已取消" => return Err(e),
+        Err(e) => {
+            let msg = format!("Poppler 快速提取不可用，改用兼容解析模式: {}", e);
+            progress(2, &msg);
+            detail_progress(2, &msg, 0, 0, 0, worker_threads);
+        }
+    }
+
+    let load_started = Instant::now();
+    let load_msg = format!("正在读取并解析 PDF 文件 ({})...", file_size_label(input_size));
+
+    progress(3, &load_msg);
+    detail_progress(3, &load_msg, 0, 0, 0, worker_threads);
     if cancel.load(Ordering::Relaxed) {
         return Err("已取消".to_string());
     }
 
-    let doc = Document::load(input_path).map_err(|e| format!("无法加载PDF文件: {}", e))?;
+    let doc = Document::load_filtered(input_path, keep_extract_images_object)
+        .map_err(|e| format!("无法加载PDF文件: {}", e))?;
     if cancel.load(Ordering::Relaxed) {
         return Err("已取消".to_string());
     }
 
     let temp_dir = create_session_temp_dir(cache_dir)?;
-    progress(15, "正在解析页面结构...");
+    let loaded_msg = format!(
+        "PDF 读取完成，用时 {}，正在解析页面结构...",
+        elapsed_label(load_started)
+    );
+    progress(12, &loaded_msg);
+    detail_progress(12, &loaded_msg, 0, 0, 0, worker_threads);
 
     let pages: Vec<(u32, ObjectId)> = doc.get_pages().into_iter().collect();
     let total_pages = pages.len();
@@ -871,7 +1216,9 @@ pub fn extract_images(
             return Err("已取消".to_string());
         }
         let pct = 15 + ((page_idx * 30) / total_pages.max(1));
-        progress(pct as u8, &format!("正在扫描第 {} 页图片...", page_num));
+        let scan_msg = format!("正在扫描第 {} 页图片，已发现 {} 张...", page_num, image_metas.len());
+        progress(pct as u8, &scan_msg);
+        detail_progress(pct as u8, &scan_msg, 0, image_metas.len(), 0, worker_threads);
 
         let xobject_dict = get_xobject_dict(&doc, *page_id);
         if xobject_dict.is_none() {
@@ -927,7 +1274,6 @@ pub fn extract_images(
         return Err("已取消".to_string());
     }
 
-    let worker_threads = normalize_worker_threads(worker_threads);
     progress(
         50,
         &format!(
@@ -1350,6 +1696,346 @@ fn decode_image_job(job: ImageJob, temp_dir: &Path) -> Option<ExtractedImageInfo
     })
 }
 
+fn load_document_for_write_with_progress(
+    input_path: &str,
+    original_size: usize,
+    image_count: usize,
+    progress: &impl Fn(u8, &str),
+    cancel: &Arc<AtomicBool>,
+) -> Result<Document, String> {
+    let started = Instant::now();
+    let input_path_for_thread = input_path.to_string();
+    let (tx, rx) = mpsc::channel();
+
+    progress(
+        5,
+        &format!(
+            "正在加载 PDF 文件 ({}，{} 张待回写)...",
+            file_size_label(original_size),
+            image_count
+        ),
+    );
+
+    std::thread::spawn(move || {
+        let result = Document::load(&input_path_for_thread)
+            .map_err(|e| format!("无法加载PDF文件: {}", e));
+        let _ = tx.send(result);
+    });
+
+    loop {
+        if cancel.load(Ordering::Relaxed) {
+            return Err("已取消".to_string());
+        }
+
+        match rx.recv_timeout(Duration::from_secs(1)) {
+            Ok(result) => {
+                let doc = result?;
+                progress(
+                    15,
+                    &format!(
+                        "PDF 加载完成，用时 {}，正在回写压缩图片...",
+                        elapsed_label(started)
+                    ),
+                );
+                return Ok(doc);
+            }
+            Err(mpsc::RecvTimeoutError::Timeout) => {
+                progress(
+                    5,
+                    &format!(
+                        "正在加载 PDF 文件 ({}，{} 张待回写，已用时 {})...",
+                        file_size_label(original_size),
+                        image_count,
+                        elapsed_label(started)
+                    ),
+                );
+            }
+            Err(mpsc::RecvTimeoutError::Disconnected) => {
+                return Err("PDF 加载线程异常结束".to_string());
+            }
+        }
+    }
+}
+
+struct PreparedCompressedImage {
+    object_id: String,
+    obj_id: ObjectId,
+    original_size: usize,
+    content: Vec<u8>,
+    dict_json: Value,
+    write_format: String,
+    source_format: String,
+}
+
+fn prepare_compressed_image_entry(
+    entry: &CompressedImageEntry,
+    original_size_fallback: Option<usize>,
+) -> Result<PreparedCompressedImage, String> {
+    let obj_id = parse_object_id(&entry.object_id)
+        .ok_or_else(|| format!("对象 id 格式无效: {}", entry.object_id))?;
+    let original_size = entry.original_size.or(original_size_fallback).unwrap_or(usize::MAX);
+
+    let compressed_data = std::fs::read(&entry.temp_path)
+        .map_err(|e| format!("读取压缩文件失败 ({})", e))?;
+
+    let (content, dict_json, write_format) = match entry.format.as_str() {
+        "jpeg" => {
+            let dict_json = json!({
+                "/Type": "/XObject",
+                "/Subtype": "/Image",
+                "/Width": entry.width,
+                "/Height": entry.height,
+                "/ColorSpace": "/DeviceRGB",
+                "/BitsPerComponent": 8,
+                "/Filter": "/DCTDecode"
+            });
+            (compressed_data, dict_json, "jpeg".to_string())
+        }
+        "png" => {
+            let img = image::load_from_memory(&compressed_data)
+                .map_err(|e| format!("解码PNG失败 ({})", e))?;
+            let rgb = img.to_rgb8();
+            let raw_pixels = rgb.as_raw();
+            let grayscale = is_grayscale_pixels(raw_pixels);
+            let binary = grayscale && is_binary_grayscale_pixels(raw_pixels);
+            let stream_pixels = if binary {
+                let luma = rgb_to_luma_pixels(raw_pixels);
+                pack_binary_luma_pixels(&luma, entry.width, entry.height)
+            } else if grayscale {
+                rgb_to_luma_pixels(raw_pixels)
+            } else {
+                raw_pixels.clone()
+            };
+
+            let mut candidate_stream = Stream::new(Dictionary::new(), stream_pixels.clone());
+            candidate_stream
+                .dict
+                .set("Filter", Object::Name(b"FlateDecode".to_vec()));
+            candidate_stream.set_plain_content(stream_pixels);
+            let _ = candidate_stream.compress();
+
+            let dict_json = json!({
+                "/Type": "/XObject",
+                "/Subtype": "/Image",
+                "/Width": entry.width,
+                "/Height": entry.height,
+                "/ColorSpace": if grayscale { "/DeviceGray" } else { "/DeviceRGB" },
+                "/BitsPerComponent": if binary { 1 } else { 8 },
+                "/Filter": "/FlateDecode"
+            });
+            let write_format = if binary {
+                "png(1-bit)"
+            } else if grayscale {
+                "png(gray)"
+            } else {
+                "png"
+            };
+            (candidate_stream.content, dict_json, write_format.to_string())
+        }
+        "webp" => {
+            let img = image::load_from_memory(&compressed_data)
+                .map_err(|e| format!("解码WebP失败 ({})", e))?;
+            let mut jpeg_buf = Cursor::new(Vec::new());
+            let rgb = image::DynamicImage::ImageRgb8(img.to_rgb8());
+            rgb.write_to(&mut jpeg_buf, image::ImageFormat::Jpeg)
+                .map_err(|e| format!("编码JPEG失败 ({})", e))?;
+
+            let dict_json = json!({
+                "/Type": "/XObject",
+                "/Subtype": "/Image",
+                "/Width": entry.width,
+                "/Height": entry.height,
+                "/ColorSpace": "/DeviceRGB",
+                "/BitsPerComponent": 8,
+                "/Filter": "/DCTDecode"
+            });
+            (jpeg_buf.into_inner(), dict_json, "jpeg".to_string())
+        }
+        _ => return Err(format!("不支持的格式 {}", entry.format)),
+    };
+
+    Ok(PreparedCompressedImage {
+        object_id: entry.object_id.clone(),
+        obj_id,
+        original_size,
+        content,
+        dict_json,
+        write_format,
+        source_format: entry.format.clone(),
+    })
+}
+
+fn write_compressed_images_with_qpdf(
+    input_path: &str,
+    output_path: &str,
+    compressed_images: &[CompressedImageEntry],
+    original_size: usize,
+    progress: &impl Fn(u8, &str),
+    cancel: &Arc<AtomicBool>,
+) -> Result<CompressImagesResult, String> {
+    let qpdf = find_qpdf_binary().ok_or_else(|| "未找到 qpdf".to_string())?;
+    let total = compressed_images.len();
+    if total == 0 {
+        return Err("没有需要压缩的图片".to_string());
+    }
+
+    let temp_dir = tempfile::Builder::new()
+        .prefix("pdf-prune-qpdf-write-")
+        .tempdir()
+        .map_err(|e| format!("创建 qpdf 临时目录失败: {}", e))?;
+
+    progress(
+        8,
+        &format!("正在准备 qpdf 快速回写数据 (0/{})...", total),
+    );
+
+    let mut actions = Vec::new();
+    let mut qpdf_objects = Map::new();
+    let mut images_compressed = 0usize;
+
+    for (idx, entry) in compressed_images.iter().enumerate() {
+        if cancel.load(Ordering::Relaxed) {
+            return Err("已取消".to_string());
+        }
+
+        let pct = 8 + ((idx * 42) / total.max(1));
+        progress(
+            pct as u8,
+            &format!("正在准备 qpdf 快速回写数据 ({}/{})...", idx + 1, total),
+        );
+
+        let prepared = match prepare_compressed_image_entry(entry, None) {
+            Ok(prepared) => prepared,
+            Err(e) => {
+                actions.push(format!("跳过 {}: {}", entry.object_id, e));
+                continue;
+            }
+        };
+        let new_size = prepared.content.len();
+        if new_size >= prepared.original_size {
+            actions.push(format!(
+                "跳过 {}: 压缩后未变小 ({}B → {}B)",
+                prepared.object_id, prepared.original_size, new_size
+            ));
+            continue;
+        }
+
+        let data_path = temp_dir.path().join(format!(
+            "obj_{}_{}.stream",
+            prepared.obj_id.0, prepared.obj_id.1
+        ));
+        std::fs::write(&data_path, &prepared.content)
+            .map_err(|e| format!("写入 qpdf stream 数据失败: {}", e))?;
+
+        qpdf_objects.insert(
+            format!("obj:{} {} R", prepared.obj_id.0, prepared.obj_id.1),
+            json!({
+                "stream": {
+                    "datafile": data_path.to_string_lossy().to_string(),
+                    "dict": prepared.dict_json,
+                }
+            }),
+        );
+        images_compressed += 1;
+        actions.push(format!(
+            "对象 {}: {} → {} ({}KB → {}KB)",
+            prepared.object_id,
+            prepared.source_format,
+            prepared.write_format,
+            prepared.original_size / 1024,
+            new_size / 1024
+        ));
+    }
+
+    if cancel.load(Ordering::Relaxed) {
+        return Err("已取消".to_string());
+    }
+
+    if images_compressed == 0 {
+        std::fs::copy(input_path, output_path)
+            .map_err(|e| format!("没有图片实际变小，复制原PDF失败: {}", e))?;
+        let output_size = file_size(output_path);
+        actions.push("没有图片实际变小，已导出原PDF以避免文件因重写结构而变大".to_string());
+        progress(100, "完成");
+        return Ok(CompressImagesResult {
+            output_path: output_path.to_string(),
+            original_size,
+            output_size,
+            images_compressed,
+            actions,
+        });
+    }
+
+    progress(
+        55,
+        &format!("正在用 qpdf 快速写出 PDF ({} 张图片)...", images_compressed),
+    );
+
+    let mut qpdf_array = vec![json!({ "jsonversion": 2 })];
+    qpdf_array.push(Value::Object(qpdf_objects));
+    let update_json = json!({
+        "version": 2,
+        "qpdf": qpdf_array
+    });
+    let json_path = temp_dir.path().join("update.json");
+    let json_bytes = serde_json::to_vec_pretty(&update_json)
+        .map_err(|e| format!("生成 qpdf JSON 失败: {}", e))?;
+    std::fs::write(&json_path, json_bytes).map_err(|e| format!("写入 qpdf JSON 失败: {}", e))?;
+
+    let tmp_path = format!("{}.qpdf.tmp", output_path);
+    let _ = std::fs::remove_file(&tmp_path);
+    let update_arg = format!("--update-from-json={}", json_path.to_string_lossy());
+    let output = Command::new(qpdf)
+        .arg(input_path)
+        .arg(update_arg)
+        .arg("--object-streams=generate")
+        .arg(&tmp_path)
+        .output()
+        .map_err(|e| format!("qpdf 快速回写启动失败: {}", e))?;
+
+    if cancel.load(Ordering::Relaxed) {
+        let _ = std::fs::remove_file(&tmp_path);
+        return Err("已取消".to_string());
+    }
+
+    if !(output.status.success() || output.status.code() == Some(3)) {
+        let _ = std::fs::remove_file(&tmp_path);
+        return Err(format!(
+            "qpdf 快速回写失败: {}",
+            String::from_utf8_lossy(&output.stderr).trim()
+        ));
+    }
+
+    progress(92, "正在完成 qpdf 输出...");
+    std::fs::rename(&tmp_path, output_path).map_err(|e| format!("重命名文件失败: {}", e))?;
+
+    let output_size = file_size(output_path);
+    actions.insert(0, "已使用 qpdf 快速回写路径，跳过 Rust 全量 PDF 解析".to_string());
+    if output.status.code() == Some(3) {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        let warning = stderr.trim();
+        if !warning.is_empty() {
+            actions.push(format!("qpdf 完成但有警告: {}", warning));
+        }
+    }
+    if output_size > original_size {
+        actions.push(format!(
+            "导出文件仍大于原文件 ({}KB → {}KB)，可能是 PDF 原始对象流/编码方式比替换后的结构更紧凑",
+            original_size / 1024,
+            output_size / 1024
+        ));
+    }
+
+    progress(100, "完成");
+    Ok(CompressImagesResult {
+        output_path: output_path.to_string(),
+        original_size,
+        output_size,
+        images_compressed,
+        actions,
+    })
+}
+
 pub fn write_compressed_images(
     input_path: &str,
     output_path: &str,
@@ -1362,12 +2048,31 @@ pub fn write_compressed_images(
         .map_err(|e| format!("无法读取文件信息: {}", e))?
         .len() as usize;
 
-    progress(5, "正在加载 PDF 文件...");
-    if cancel.load(Ordering::Relaxed) {
-        return Err("已取消".to_string());
+    match write_compressed_images_with_qpdf(
+        input_path,
+        output_path,
+        &compressed_images,
+        original_size,
+        &progress,
+        &cancel,
+    ) {
+        Ok(result) => return Ok(result),
+        Err(e) if e == "已取消" => return Err(e),
+        Err(e) => {
+            progress(
+                5,
+                &format!("qpdf 快速回写不可用，改用兼容回写模式: {}", e),
+            );
+        }
     }
 
-    let mut doc = Document::load(input_path).map_err(|e| format!("无法加载PDF文件: {}", e))?;
+    let mut doc = load_document_for_write_with_progress(
+        input_path,
+        original_size,
+        compressed_images.len(),
+        &progress,
+        &cancel,
+    )?;
     if cancel.load(Ordering::Relaxed) {
         return Err("已取消".to_string());
     }
