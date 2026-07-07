@@ -130,6 +130,7 @@ async fn extract_images(
     app: AppHandle,
     input_path: String,
     worker_threads: Option<usize>,
+    cache_dir: Option<String>,
 ) -> Result<Vec<ExtractedImageInfo>, String> {
     let cancel = Arc::new(AtomicBool::new(false));
     let progress_app = app.clone();
@@ -139,6 +140,7 @@ async fn extract_images(
         compress_images::extract_images(
             &input_path,
             worker_threads.unwrap_or(0),
+            cache_dir.as_deref(),
             |pct, msg| {
                 let _ = progress_app.emit("extract-images-progress", (pct, msg));
             },
@@ -163,6 +165,33 @@ async fn extract_images(
 
     let _ = app.emit("extract-images-progress", (100u8, "完成"));
     result
+}
+
+#[tauri::command]
+async fn get_default_cache_dir() -> Result<String, String> {
+    Ok(compress_images::default_cache_root())
+}
+
+#[tauri::command]
+async fn write_cache_file(
+    cache_dir: Option<String>,
+    filename: String,
+    data: Vec<u8>,
+) -> Result<String, String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        compress_images::write_cache_file(cache_dir.as_deref(), &filename, data)
+    })
+    .await
+    .map_err(|e| format!("写入缓存任务执行失败: {}", e))?
+}
+
+#[tauri::command]
+async fn clear_cache_dir(cache_dir: Option<String>) -> Result<usize, String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        compress_images::clear_cache_dir(cache_dir.as_deref())
+    })
+    .await
+    .map_err(|e| format!("清空缓存任务执行失败: {}", e))?
 }
 
 #[tauri::command]
@@ -205,6 +234,9 @@ pub fn run() {
             remove_images,
             list_images,
             extract_images,
+            get_default_cache_dir,
+            write_cache_file,
+            clear_cache_dir,
             write_compressed_images
         ])
         .run(tauri::generate_context!())

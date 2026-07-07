@@ -1,6 +1,5 @@
 import { useState, useCallback, useEffect } from "react";
-import { convertFileSrc } from "@tauri-apps/api/core";
-import { writeFile } from "@tauri-apps/plugin-fs";
+import { convertFileSrc, invoke } from "@tauri-apps/api/core";
 import {
   X,
   Loader2,
@@ -74,6 +73,7 @@ interface ImageDetailModalProps {
   defaultQuality: number;
   defaultScale: number;
   defaultMaxWidth: number;
+  cacheDir: string | null;
 }
 
 export function ImageDetailModal({
@@ -85,6 +85,7 @@ export function ImageDetailModal({
   defaultQuality,
   defaultScale,
   defaultMaxWidth,
+  cacheDir,
 }: ImageDetailModalProps) {
   const [format, setFormat] = useState<CompressFormat>(defaultFormat);
   const [quality, setQuality] = useState(defaultQuality);
@@ -123,11 +124,11 @@ export function ImageDetailModal({
         maxWidth: maxWidth > 0 ? maxWidth : undefined,
       });
 
-      const compressedPath = image.temp_path.replace(
-        /\.(jpg|png|jp2|bin)$/,
-        `_compressed.${format}`,
-      );
-      await writeFile(compressedPath, new Uint8Array(result.data));
+      const compressedPath = await invoke<string>("write_cache_file", {
+        cacheDir,
+        filename: `img_${image.object_id.replace(/\s+/g, "_")}_compressed.${format}`,
+        data: Array.from(new Uint8Array(result.data)),
+      });
 
       const blob = new Blob([result.data], { type: `image/${format}` });
       const previewUrl = URL.createObjectURL(blob);
@@ -136,6 +137,7 @@ export function ImageDetailModal({
         object_id: image.object_id,
         original_size: pdfImageSize(image),
         compressed_size: result.compressedSize,
+        temp_path: compressedPath,
         compressed_preview_path: previewUrl,
         format,
         width: result.width,
@@ -146,7 +148,7 @@ export function ImageDetailModal({
     } finally {
       setCompressing(false);
     }
-  }, [image, format, quality, scale, maxWidth, onCompressed]);
+  }, [image, format, quality, scale, maxWidth, cacheDir, onCompressed]);
 
   return (
     <>

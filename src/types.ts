@@ -148,6 +148,7 @@ export interface CompressedImagePreview {
   object_id: string;
   original_size: number;
   compressed_size: number;
+  temp_path: string;
   compressed_preview_path: string;
   format: string;
   width: number;

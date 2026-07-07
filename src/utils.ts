@@ -1,8 +1,10 @@
 export function formatSize(bytes: number): string {
-  if (bytes < 1024) return `${bytes} B`;
-  if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(1)} KB`;
-  if (bytes < 1024 * 1024 * 1024) return `${(bytes / (1024 * 1024)).toFixed(2)} MB`;
-  return `${(bytes / (1024 * 1024 * 1024)).toFixed(2)} GB`;
+  const sign = bytes < 0 ? "-" : "";
+  const absBytes = Math.abs(bytes);
+  if (absBytes < 1024) return `${sign}${absBytes} B`;
+  if (absBytes < 1024 * 1024) return `${sign}${(absBytes / 1024).toFixed(1)} KB`;
+  if (absBytes < 1024 * 1024 * 1024) return `${sign}${(absBytes / (1024 * 1024)).toFixed(2)} MB`;
+  return `${sign}${(absBytes / (1024 * 1024 * 1024)).toFixed(2)} GB`;
 }
 
 export function formatPercent(value: number, total: number): string {

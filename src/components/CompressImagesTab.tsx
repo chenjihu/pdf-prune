@@ -2,13 +2,14 @@ import { useState, useCallback, useEffect, useMemo, useRef } from "react";
 import { invoke, convertFileSrc } from "@tauri-apps/api/core";
 import { listen, type UnlistenFn } from "@tauri-apps/api/event";
 import { save } from "@tauri-apps/plugin-dialog";
-import { writeFile } from "@tauri-apps/plugin-fs";
 import {
   Loader2,
   CheckCircle2,
   AlertCircle,
   Download,
   RotateCcw,
+  FolderCog,
+  Trash2,
   Images,
   Sliders,
   ZoomIn,
@@ -44,6 +45,14 @@ interface CompressImagesTabProps {
   elapsedTime: number;
   startTime: number | null;
   endTime: number | null;
+  cacheDir: string | null;
+  usingDefaultCacheDir: boolean;
+  cacheMessage: string | null;
+  cacheError: string | null;
+  clearingCache: boolean;
+  onChooseCacheDir: () => void;
+  onResetCacheDir: () => void;
+  onClearCache: () => void;
 }
 
 interface FilterState {
@@ -197,6 +206,14 @@ export function CompressImagesTab({
   elapsedTime,
   startTime,
   endTime,
+  cacheDir,
+  usingDefaultCacheDir,
+  cacheMessage,
+  cacheError,
+  clearingCache,
+  onChooseCacheDir,
+  onResetCacheDir,
+  onClearCache,
 }: CompressImagesTabProps) {
   const [filters, setFilters] = useState<FilterState>(DEFAULT_FILTERS);
   const [selectedIds, setSelectedIds] = useState<Set<string>>(new Set());
@@ -332,8 +349,11 @@ export function CompressImagesTab({
         });
 
         // Write compressed data to temp file
-        const compressedPath = img.temp_path.replace(/\.(jpg|png|jp2)$/, `_compressed.${compressFormat}`);
-        await writeFile(compressedPath, new Uint8Array(result.data));
+        const compressedPath = await invoke<string>("write_cache_file", {
+          cacheDir,
+          filename: `img_${img.object_id.replace(/\s+/g, "_")}_compressed.${compressFormat}`,
+          data: Array.from(new Uint8Array(result.data)),
+        });
 
         // Generate preview URL from compressed data
         const blob = new Blob([result.data], { type: `image/${compressFormat}` });
@@ -343,6 +363,7 @@ export function CompressImagesTab({
           object_id: img.object_id,
           original_size: pdfImageSize(img),
           compressed_size: result.compressedSize,
+          temp_path: compressedPath,
           compressed_preview_path: previewUrl,
           format: compressFormat,
           width: result.width,
@@ -356,7 +377,7 @@ export function CompressImagesTab({
     setCompressedPreviews(previews);
     setCompressing(false);
     setCompressProgress(null);
-  }, [extractedImages, selectedIds, compressFormat, quality, scale, maxWidth]);
+  }, [extractedImages, selectedIds, compressFormat, quality, scale, maxWidth, cacheDir]);
 
   const handleExport = useCallback(async () => {
     if (!inputPath || compressedPreviews.size === 0) return;
@@ -377,10 +398,9 @@ export function CompressImagesTab({
       for (const [id, preview] of compressedPreviews) {
         const img = extractedImages?.find((i) => i.id === id);
         if (!img) continue;
-        const compressedPath = img.temp_path.replace(/\.(jpg|png|jp2)$/, `_compressed.${preview.format}`);
         entries.push({
           object_id: img.object_id,
-          temp_path: compressedPath,
+          temp_path: preview.temp_path,
           format: preview.format,
           width: preview.width,
           height: preview.height,
@@ -563,6 +583,46 @@ export function CompressImagesTab({
             <span>{maxExtractThreads} 线程</span>
           </div>
         </div>
+        <div className="w-full max-w-lg mb-5 rounded-lg border border-neutral-800 bg-neutral-900/40 p-3 space-y-3">
+          <div className="flex items-center gap-2 text-xs text-neutral-400">
+            <FolderCog className="w-4 h-4" />
+            <span className="font-medium">缓存目录</span>
+            {usingDefaultCacheDir && <span className="text-neutral-600">默认</span>}
+          </div>
+          <div className="rounded bg-neutral-950/60 border border-neutral-800 px-2 py-1.5 text-[11px] text-neutral-400 truncate">
+            {cacheDir || "读取默认缓存目录中..."}
+          </div>
+          <div className="flex flex-wrap gap-2">
+            <button
+              type="button"
+              onClick={onChooseCacheDir}
+              className="px-3 py-1.5 rounded-lg bg-neutral-800 hover:bg-neutral-700 text-xs text-neutral-300 transition-colors"
+            >
+              指定目录
+            </button>
+            <button
+              type="button"
+              onClick={onResetCacheDir}
+              className="px-3 py-1.5 rounded-lg bg-neutral-800 hover:bg-neutral-700 text-xs text-neutral-300 transition-colors"
+            >
+              恢复默认
+            </button>
+            <button
+              type="button"
+              onClick={onClearCache}
+              disabled={clearingCache}
+              className="inline-flex items-center gap-1 px-3 py-1.5 rounded-lg bg-red-950/50 hover:bg-red-900/60 disabled:opacity-50 text-xs text-red-200 transition-colors"
+            >
+              {clearingCache ? <Loader2 className="w-3.5 h-3.5 animate-spin" /> : <Trash2 className="w-3.5 h-3.5" />}
+              清空缓存
+            </button>
+          </div>
+          <p className="text-[11px] text-neutral-600">
+            只会清理该目录下由本工具创建的 pdf-prune-* 缓存会话。
+          </p>
+          {cacheMessage && <p className="text-[11px] text-green-400">{cacheMessage}</p>}
+          {cacheError && <p className="text-[11px] text-red-300">{cacheError}</p>}
+        </div>
         <button
           onClick={() => onExtract(extractThreadCount)}
           className="flex items-center gap-2 px-6 py-3 rounded-xl bg-blue-600 hover:bg-blue-500 transition-colors font-medium text-white shadow-lg shadow-blue-600/20"
@@ -654,6 +714,7 @@ export function CompressImagesTab({
           defaultQuality={quality}
           defaultScale={scale}
           defaultMaxWidth={maxWidth}
+          cacheDir={cacheDir}
         />
       )}
 

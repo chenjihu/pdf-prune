@@ -497,14 +497,62 @@ fn make_placeholder_preview(width: u32, height: u32, out_path: &Path) -> Result<
     Ok(())
 }
 
-fn create_session_temp_dir() -> Result<std::path::PathBuf, String> {
+pub fn default_cache_root() -> String {
+    std::env::temp_dir().to_string_lossy().to_string()
+}
+
+fn cache_root(cache_dir: Option<&str>) -> std::path::PathBuf {
+    cache_dir
+        .filter(|path| !path.trim().is_empty())
+        .map(std::path::PathBuf::from)
+        .unwrap_or_else(std::env::temp_dir)
+}
+
+pub fn create_session_temp_dir(cache_dir: Option<&str>) -> Result<std::path::PathBuf, String> {
     let now = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .map_err(|e| format!("获取时间失败: {}", e))?
         .as_millis();
-    let dir = std::env::temp_dir().join(format!("pdf-prune-{}", now));
+    let root = cache_root(cache_dir);
+    std::fs::create_dir_all(&root).map_err(|e| format!("创建缓存目录失败: {}", e))?;
+    let dir = root.join(format!("pdf-prune-{}", now));
     std::fs::create_dir_all(&dir).map_err(|e| format!("创建临时目录失败: {}", e))?;
     Ok(dir)
+}
+
+pub fn write_cache_file(cache_dir: Option<&str>, filename: &str, data: Vec<u8>) -> Result<String, String> {
+    let dir = create_session_temp_dir(cache_dir)?;
+    let safe_name = Path::new(filename)
+        .file_name()
+        .and_then(|name| name.to_str())
+        .filter(|name| !name.is_empty())
+        .unwrap_or("image.bin");
+    let path = dir.join(safe_name);
+    std::fs::write(&path, data).map_err(|e| format!("写入缓存文件失败: {}", e))?;
+    Ok(path.to_string_lossy().to_string())
+}
+
+pub fn clear_cache_dir(cache_dir: Option<&str>) -> Result<usize, String> {
+    let root = cache_root(cache_dir);
+    if !root.exists() {
+        return Ok(0);
+    }
+    if !root.is_dir() {
+        return Err("缓存路径不是目录".to_string());
+    }
+
+    let mut removed = 0usize;
+    for entry in std::fs::read_dir(&root).map_err(|e| format!("读取缓存目录失败: {}", e))? {
+        let entry = entry.map_err(|e| format!("读取缓存项失败: {}", e))?;
+        let path = entry.path();
+        let name = entry.file_name();
+        let name = name.to_string_lossy();
+        if name.starts_with("pdf-prune-") && path.is_dir() {
+            std::fs::remove_dir_all(&path).map_err(|e| format!("删除缓存目录失败: {}", e))?;
+            removed += 1;
+        }
+    }
+    Ok(removed)
 }
 
 fn make_preview(image_data: &[u8], max_dim: u32, out_path: &Path) -> Result<(), String> {
@@ -758,6 +806,7 @@ fn raw_pixels_to_png(
 pub fn extract_images(
     input_path: &str,
     worker_threads: usize,
+    cache_dir: Option<&str>,
     progress: impl Fn(u8, &str) + Sync,
     detail_progress: impl Fn(u8, &str, usize, usize, usize, usize) + Sync,
     cancel: Arc<AtomicBool>,
@@ -772,7 +821,7 @@ pub fn extract_images(
         return Err("已取消".to_string());
     }
 
-    let temp_dir = create_session_temp_dir()?;
+    let temp_dir = create_session_temp_dir(cache_dir)?;
     progress(15, "正在解析页面结构...");
 
     let pages: Vec<(u32, ObjectId)> = doc.get_pages().into_iter().collect();

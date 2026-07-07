@@ -5,6 +5,7 @@ use serde::{Deserialize, Serialize};
 use std::collections::HashSet;
 use std::io::Write;
 use std::path::Path;
+use std::process::Command;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 
@@ -29,7 +30,7 @@ pub struct PruneResult {
     pub output_path: String,
     pub original_size: usize,
     pub pruned_size: usize,
-    pub savings: usize,
+    pub savings: isize,
     pub savings_percent: f64,
     pub actions: Vec<String>,
 }
@@ -112,6 +113,55 @@ fn is_font_program(dict: &Dictionary) -> bool {
     dict.get(b"Type")
         .map(|v| name_eq(v, b"FontFile"))
         .unwrap_or(false)
+}
+
+fn file_size(path: &str) -> usize {
+    Path::new(path)
+        .metadata()
+        .map(|m| m.len() as usize)
+        .unwrap_or(0)
+}
+
+fn file_size_label(bytes: usize) -> String {
+    if bytes < 1024 {
+        format!("{} B", bytes)
+    } else if bytes < 1024 * 1024 {
+        format!("{:.1} KB", bytes as f64 / 1024.0)
+    } else {
+        format!("{:.2} MB", bytes as f64 / (1024.0 * 1024.0))
+    }
+}
+
+fn optimize_pdf_object_streams(input_path: &str, output_path: &str) -> Result<(), String> {
+    let qpdf_candidates = ["qpdf", "/opt/homebrew/bin/qpdf", "/usr/local/bin/qpdf"];
+    let mut last_error = None;
+
+    for qpdf in qpdf_candidates {
+        let output = match Command::new(qpdf)
+            .args(["--object-streams=generate"])
+            .arg(input_path)
+            .arg(output_path)
+            .output()
+        {
+            Ok(output) => output,
+            Err(e) => {
+                last_error = Some(format!("{}: {}", qpdf, e));
+                continue;
+            }
+        };
+
+        if output.status.success() || output.status.code() == Some(3) {
+            return Ok(());
+        }
+
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        last_error = Some(format!("{}: {}", qpdf, stderr.trim()));
+    }
+
+    Err(format!(
+        "qpdf 对象流优化不可用: {}",
+        last_error.unwrap_or_else(|| "未找到 qpdf".to_string())
+    ))
 }
 
 pub fn prune_pdf(
@@ -380,22 +430,52 @@ pub fn prune_pdf(
         return Err("已取消".to_string());
     }
 
-    // Save the pruned document
-    doc.compress();
-    doc.save(output_path)
+    // Save without calling doc.compress(): recompressing every stream can expand PDFs
+    // that already use compact object streams or specialized filters.
+    let tmp_path = format!("{}.tmp", output_path);
+    doc.save(&tmp_path)
         .map_err(|e| format!("无法保存修剪后的PDF: {}", e))?;
+
+    let optimized_tmp_path = format!("{}.optimized.tmp", output_path);
+    let mut final_tmp_path = tmp_path.as_str();
+    match optimize_pdf_object_streams(&tmp_path, &optimized_tmp_path) {
+        Ok(_) => {
+            if file_size(&optimized_tmp_path) < file_size(&tmp_path) {
+                final_tmp_path = optimized_tmp_path.as_str();
+                actions.push("已重新生成 PDF 对象流，降低保存结构开销".to_string());
+            } else {
+                let _ = std::fs::remove_file(&optimized_tmp_path);
+            }
+        }
+        Err(e) => {
+            actions.push(format!("{}，已使用常规保存结果", e));
+        }
+    }
+
+    std::fs::rename(final_tmp_path, output_path)
+        .map_err(|e| format!("无法写入修剪后的PDF: {}", e))?;
+    if final_tmp_path != tmp_path {
+        let _ = std::fs::remove_file(&tmp_path);
+    }
 
     let pruned_size = Path::new(output_path)
         .metadata()
         .map_err(|e| format!("无法读取输出文件: {}", e))?
         .len() as usize;
 
-    let savings = original_size.saturating_sub(pruned_size);
+    let savings = original_size as isize - pruned_size as isize;
     let savings_percent = if original_size > 0 {
         (savings as f64 / original_size as f64) * 100.0
     } else {
         0.0
     };
+
+    if pruned_size > original_size {
+        actions.push(format!(
+            "输出文件比原文件大 {}，原因通常是 PDF 保存时重写交叉引用表/对象流的结构开销大于已移除对象体积",
+            file_size_label(pruned_size - original_size)
+        ));
+    }
 
     Ok(PruneResult {
         output_path: output_path.to_string(),

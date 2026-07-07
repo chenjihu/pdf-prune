@@ -96,6 +96,11 @@ function App() {
   const [extractedImages, setExtractedImages] = useState<ExtractedImageInfo[] | null>(null);
   const [compressInputPath, setCompressInputPath] = useState<string | null>(null);
   const [extractProgress, setExtractProgress] = useState<ExtractProgress | null>(null);
+  const [cacheDir, setCacheDir] = useState<string | null>(() => localStorage.getItem("pdf-prune-cache-dir"));
+  const [defaultCacheDir, setDefaultCacheDir] = useState<string | null>(null);
+  const [cacheMessage, setCacheMessage] = useState<string | null>(null);
+  const [cacheError, setCacheError] = useState<string | null>(null);
+  const [clearingCache, setClearingCache] = useState(false);
 
   const openPdf = useCallback(async () => {
     try {
@@ -220,6 +225,7 @@ function App() {
       const result = await invoke<ExtractedImageInfo[]>("extract_images", {
         inputPath: selected,
         workerThreads,
+        cacheDir: cacheDir || null,
       });
       setExtractedImages(result);
       setEndTime(Date.now());
@@ -230,7 +236,45 @@ function App() {
       setExtracting(false);
       setExtractProgress(null);
     }
+  }, [cacheDir]);
+
+  const chooseCacheDir = useCallback(async () => {
+    try {
+      const selected = await open({
+        directory: true,
+        multiple: false,
+      });
+      if (!selected || Array.isArray(selected)) return;
+      setCacheDir(selected);
+      localStorage.setItem("pdf-prune-cache-dir", selected);
+      setCacheMessage("缓存目录已更新");
+      setCacheError(null);
+    } catch (e) {
+      setCacheError(String(e));
+      setCacheMessage(null);
+    }
   }, []);
+
+  const resetCacheDir = useCallback(() => {
+    localStorage.removeItem("pdf-prune-cache-dir");
+    setCacheDir(null);
+    setCacheMessage("已恢复默认缓存目录");
+    setCacheError(null);
+  }, []);
+
+  const clearCache = useCallback(async () => {
+    try {
+      setClearingCache(true);
+      setCacheError(null);
+      setCacheMessage(null);
+      const removed = await invoke<number>("clear_cache_dir", { cacheDir: cacheDir || null });
+      setCacheMessage(`已清空 ${removed} 个缓存会话目录`);
+    } catch (e) {
+      setCacheError(String(e));
+    } finally {
+      setClearingCache(false);
+    }
+  }, [cacheDir]);
 
   const resetCompressImages = useCallback(() => {
     setExtractedImages(null);
@@ -280,6 +324,12 @@ function App() {
     }, 1000);
     return () => clearInterval(interval);
   }, [loading, pruning, removingImages, scanning, extracting, startTime]);
+
+  useEffect(() => {
+    invoke<string>("get_default_cache_dir")
+      .then(setDefaultCacheDir)
+      .catch((e) => setCacheError(String(e)));
+  }, []);
 
   // Listen for progress events
   useEffect(() => {
@@ -370,7 +420,7 @@ function App() {
               }`}
             >
               <Scissors className="w-4 h-4" />
-              PDF 瘦身
+              PDF组成分析
             </button>
             <button
               onClick={() => setTab("removeImages")}
@@ -379,7 +429,7 @@ function App() {
               `}
             >
               <ImageMinus className="w-4 h-4" />
-              移除图片
+              移除PDF中的特定图片
             </button>
             <button
               onClick={() => setTab("compressImages")}
@@ -388,7 +438,7 @@ function App() {
               }`}
             >
               <Images className="w-4 h-4" />
-              压缩图片
+              压缩PDF中的图片
             </button>
           </div>
         </div>
@@ -724,13 +774,23 @@ function App() {
                       {formatSize(pruneResult.pruned_size)}
                     </div>
                   </div>
-                  <div className="text-center p-4 rounded-xl bg-green-950/30 border border-green-800/30">
-                    <div className="text-xs text-neutral-500 mb-1">节省</div>
-                    <div className="text-lg font-bold font-mono text-green-400">
-                      {formatSize(pruneResult.savings)}
+                  <div className={`text-center p-4 rounded-xl border ${
+                    pruneResult.savings >= 0
+                      ? "bg-green-950/30 border-green-800/30"
+                      : "bg-amber-950/30 border-amber-800/30"
+                  }`}>
+                    <div className="text-xs text-neutral-500 mb-1">
+                      {pruneResult.savings >= 0 ? "节省" : "增加"}
                     </div>
-                    <div className="text-xs text-green-500">
-                      {pruneResult.savings_percent.toFixed(1)}%
+                    <div className={`text-lg font-bold font-mono ${
+                      pruneResult.savings >= 0 ? "text-green-400" : "text-amber-400"
+                    }`}>
+                      {formatSize(Math.abs(pruneResult.savings))}
+                    </div>
+                    <div className={`text-xs ${
+                      pruneResult.savings >= 0 ? "text-green-500" : "text-amber-500"
+                    }`}>
+                      {Math.abs(pruneResult.savings_percent).toFixed(1)}%
                     </div>
                   </div>
                 </div>
@@ -790,6 +850,14 @@ function App() {
             elapsedTime={elapsedTime}
             startTime={startTime}
             endTime={endTime}
+            cacheDir={cacheDir || defaultCacheDir}
+            usingDefaultCacheDir={!cacheDir}
+            cacheMessage={cacheMessage}
+            cacheError={cacheError}
+            clearingCache={clearingCache}
+            onChooseCacheDir={chooseCacheDir}
+            onResetCacheDir={resetCacheDir}
+            onClearCache={clearCache}
           />
         )}
 
@@ -884,7 +952,7 @@ function RemoveImagesTab({
           <div className="w-24 h-24 rounded-3xl bg-gradient-to-br from-orange-500/20 to-red-600/20 border border-neutral-800 flex items-center justify-center mb-6">
             <ImageMinus className="w-12 h-12 text-neutral-400" />
           </div>
-          <h2 className="text-xl font-bold mb-2">移除指定尺寸的图片</h2>
+          <h2 className="text-xl font-bold mb-2">移除PDF中指定尺寸的图片</h2>
           <p className="text-neutral-400 text-sm mb-8 text-center max-w-lg">
             根据图片的像素尺寸和纵向坐标范围，移除 PDF 每页中匹配的图片
           </p>
