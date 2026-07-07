@@ -10,12 +10,15 @@ import {
   RotateCcw,
   FolderCog,
   Trash2,
+  Undo2,
   Images,
   Sliders,
   ZoomIn,
   CheckSquare,
   Square,
   CircleHelp,
+  ChevronLeft,
+  ChevronRight,
 } from "lucide-react";
 import type {
   ExtractedImageInfo,
@@ -24,7 +27,13 @@ import type {
   CompressedImagePreview,
 } from "../types";
 import { formatSize, formatDuration } from "../utils";
-import { compressImage, formatKB, compressionRatio, type CompressFormat } from "../lib/imageCompress";
+import {
+  compressImage,
+  formatKB,
+  compressionRatio,
+  type ColorReductionMode,
+  type CompressFormat,
+} from "../lib/imageCompress";
 import { ImageDetailModal } from "./ImageDetailModal";
 
 interface CompressImagesTabProps {
@@ -91,11 +100,20 @@ const DEFAULT_FILTERS: FilterState = {
   formatFilter: new Set(),
 };
 
-const IMAGE_LIST_PAGE_SIZE = 120;
+const IMAGE_LIST_PAGE_SIZES = [50, 100, 200, 500];
 const RAW_FORMAT_HELP =
   "raw 表示这张图是 PDF 内部的原始图像数据或特殊编码流，不是可直接保存的 JPEG/PNG/WebP。它通常需要结合宽高、颜色空间、位深和 DecodeParms 才能还原，部分 raw 图片可能无法压缩。";
 const PDF_SIZE_HELP =
   "PDF 大小表示这张图片在 PDF 内部原始图片流中占用的空间。它可能远小于提取出来的 PNG/JPEG 临时文件；导出时会按这个内部流大小判断是否值得替换。";
+const COLOR_REDUCTION_OPTIONS: { value: ColorReductionMode; label: string }[] = [
+  { value: "none", label: "原色" },
+  { value: "grayscale", label: "灰度" },
+  { value: "colors256", label: "256色" },
+  { value: "colors64", label: "64色" },
+  { value: "colors16", label: "16色" },
+  { value: "colors4", label: "4色" },
+  { value: "binary", label: "黑白" },
+];
 
 function pdfImageSize(image: ExtractedImageInfo): number {
   return image.pdf_size ?? image.file_size;
@@ -221,6 +239,8 @@ export function CompressImagesTab({
   const [quality, setQuality] = useState(75);
   const [scale, setScale] = useState(100);
   const [maxWidth, setMaxWidth] = useState(0);
+  const [colorReduction, setColorReduction] = useState<ColorReductionMode>("none");
+  const [binaryThreshold, setBinaryThreshold] = useState(180);
   const [compressing, setCompressing] = useState(false);
   const [compressProgress, setCompressProgress] = useState<{ current: number; total: number } | null>(null);
   const [compressedPreviews, setCompressedPreviews] = useState<Map<string, CompressedImagePreview>>(new Map());
@@ -230,7 +250,8 @@ export function CompressImagesTab({
   const [exportResult, setExportResult] = useState<CompressImagesResult | null>(null);
   const [exportError, setExportError] = useState<string | null>(null);
   const [compressError, setCompressError] = useState<string | null>(null);
-  const [visibleCount, setVisibleCount] = useState(IMAGE_LIST_PAGE_SIZE);
+  const [pageSize, setPageSize] = useState(50);
+  const [currentPage, setCurrentPage] = useState(1);
   const [extractThreadCount, setExtractThreadCount] = useState(getDefaultExtractThreads);
   const maxExtractThreads = Math.min(32, Math.max(2, navigator.hardwareConcurrency || 8));
 
@@ -281,12 +302,23 @@ export function CompressImagesTab({
   }, [extractedImages, filters, compressedPreviews]);
 
   useEffect(() => {
-    setVisibleCount(IMAGE_LIST_PAGE_SIZE);
-  }, [extractedImages, filters]);
+    setCurrentPage(1);
+  }, [extractedImages, filters, pageSize]);
+
+  const totalPages = Math.max(1, Math.ceil(filteredImages.length / pageSize));
+  const safeCurrentPage = Math.min(currentPage, totalPages);
+  const pageStart = (safeCurrentPage - 1) * pageSize;
+  const pageEnd = Math.min(filteredImages.length, pageStart + pageSize);
+
+  useEffect(() => {
+    if (currentPage > totalPages) {
+      setCurrentPage(totalPages);
+    }
+  }, [currentPage, totalPages]);
 
   const visibleImages = useMemo(
-    () => filteredImages.slice(0, visibleCount),
-    [filteredImages, visibleCount],
+    () => filteredImages.slice(pageStart, pageEnd),
+    [filteredImages, pageStart, pageEnd],
   );
 
   // Pages list for filter dropdown
@@ -346,6 +378,8 @@ export function CompressImagesTab({
           quality,
           scale: scale / 100,
           maxWidth: maxWidth > 0 ? maxWidth : undefined,
+          colorReduction,
+          binaryThreshold,
         });
 
         // Write compressed data to temp file
@@ -377,7 +411,7 @@ export function CompressImagesTab({
     setCompressedPreviews(previews);
     setCompressing(false);
     setCompressProgress(null);
-  }, [extractedImages, selectedIds, compressFormat, quality, scale, maxWidth, cacheDir]);
+  }, [extractedImages, selectedIds, compressFormat, quality, scale, maxWidth, colorReduction, binaryThreshold, cacheDir]);
 
   const handleExport = useCallback(async () => {
     if (!inputPath || compressedPreviews.size === 0) return;
@@ -457,6 +491,42 @@ export function CompressImagesTab({
       return next;
     });
   }, []);
+
+  const undoCompressedImage = useCallback((id: string) => {
+    setCompressedPreviews((prev) => {
+      const next = new Map(prev);
+      next.delete(id);
+      return next;
+    });
+    setExportResult(null);
+    setExportError(null);
+  }, []);
+
+  const clearCompressedPreviews = useCallback(() => {
+    setCompressedPreviews(new Map());
+    setExportResult(null);
+    setExportError(null);
+  }, []);
+
+  const clearSelectedCompressedPreviews = useCallback(() => {
+    setCompressedPreviews((prev) => {
+      const next = new Map(prev);
+      for (const id of selectedIds) {
+        next.delete(id);
+      }
+      return next;
+    });
+    setExportResult(null);
+    setExportError(null);
+  }, [selectedIds]);
+
+  const selectedCompressedCount = useMemo(() => {
+    let count = 0;
+    for (const id of selectedIds) {
+      if (compressedPreviews.has(id)) count += 1;
+    }
+    return count;
+  }, [selectedIds, compressedPreviews]);
 
   // ===== Render =====
 
@@ -710,10 +780,13 @@ export function CompressImagesTab({
           preview={detailPreview ?? null}
           onClose={() => setDetailImageId(null)}
           onCompressed={handleDetailCompressed}
+          onUndoCompressed={undoCompressedImage}
           defaultFormat={compressFormat}
           defaultQuality={quality}
           defaultScale={scale}
           defaultMaxWidth={maxWidth}
+          defaultColorReduction={colorReduction}
+          defaultBinaryThreshold={binaryThreshold}
           cacheDir={cacheDir}
         />
       )}
@@ -917,10 +990,22 @@ export function CompressImagesTab({
           ))}
         </div>
         {/* Format filter */}
-        {formats.length > 1 && (
-          <div className="flex items-center gap-3 flex-wrap">
-            <span className="text-xs text-neutral-500">格式：</span>
-            {formats.map((f) => (
+        <div className="flex items-center gap-3 flex-wrap">
+          <span className="text-xs text-neutral-500">格式：</span>
+          <button
+            onClick={() => setFilters({ ...filters, formatFilter: new Set() })}
+            className={`px-2 py-0.5 rounded text-xs transition-colors ${
+              filters.formatFilter.size === 0
+                ? "bg-blue-600 text-white"
+                : "bg-neutral-800 text-neutral-400 hover:bg-neutral-700"
+            }`}
+          >
+            全部格式
+          </button>
+          {formats.length === 0 ? (
+            <span className="text-xs text-neutral-600">暂无格式</span>
+          ) : (
+            formats.map((f) => (
               <button
                 key={f}
                 onClick={() => {
@@ -937,9 +1022,9 @@ export function CompressImagesTab({
               >
                 {f}
               </button>
-            ))}
-          </div>
-        )}
+            ))
+          )}
+        </div>
         {/* Select all / deselect */}
         <div className="flex items-center gap-3">
           <button
@@ -959,128 +1044,184 @@ export function CompressImagesTab({
         </div>
       </div>
 
-      {/* Image list */}
-      <div className="rounded-xl bg-neutral-800/30 border border-neutral-700/50 p-4 max-h-96 overflow-y-auto">
-        {filteredImages.length === 0 ? (
-          <p className="text-center text-neutral-500 text-sm py-8">没有匹配的图片</p>
-        ) : (
-          <div className="space-y-3">
-            <div className="grid grid-cols-2 md:grid-cols-3 lg:grid-cols-4 gap-3">
-              {visibleImages.map((img) => {
-                const isSelected = selectedIds.has(img.id);
-                const preview = compressedPreviews.get(img.id);
-                return (
-                  <div
-                    key={img.id}
-                    className={`relative rounded-lg border p-2 transition-colors ${
-                      !img.supported
-                        ? "bg-neutral-900/50 border-neutral-800 opacity-60 cursor-not-allowed"
-                        : isSelected
-                        ? "bg-blue-950/30 border-blue-700/50 cursor-pointer"
-                        : "bg-neutral-800/50 border-neutral-700/50 hover:border-neutral-600 cursor-pointer"
-                    }`}
-                    onClick={() => toggleSelect(img.id)}
-                  >
-                    {/* Thumbnail */}
-                    <div className="relative aspect-video bg-neutral-900 rounded mb-2 overflow-hidden">
-                      <img
-                        src={convertFileSrc(img.preview_path)}
-                        alt={img.name}
-                        loading="lazy"
-                        decoding="async"
-                        className="w-full h-full object-contain cursor-zoom-in"
-                        onClick={(e) => {
-                          e.stopPropagation();
-                          setDetailImageId(img.id);
-                        }}
-                      />
-                      {!img.supported && (
-                        <div className="absolute inset-0 flex items-center justify-center">
-                          <span className="px-2 py-0.5 rounded bg-black/70 text-neutral-300 text-[10px] font-medium">
-                            不支持解码
-                          </span>
-                        </div>
-                      )}
-                      {/* Selection checkbox */}
-                      {img.supported && (
-                        <div className="absolute top-1 right-1">
-                          {isSelected ? (
-                            <div className="w-5 h-5 rounded bg-blue-600 flex items-center justify-center">
-                              <CheckSquare className="w-3.5 h-3.5 text-white" />
-                            </div>
-                          ) : (
-                            <div className="w-5 h-5 rounded bg-black/50 border border-neutral-600" />
-                          )}
-                        </div>
-                      )}
-                      {/* Detail/compare button */}
-                      {img.supported && (
-                        <button
+      <div className="grid grid-cols-1 xl:grid-cols-[minmax(0,1fr)_360px] gap-4 items-start">
+        {/* Image list */}
+        <div className="rounded-xl bg-neutral-800/30 border border-neutral-700/50 p-4 min-h-[620px]">
+          <div className="flex flex-col gap-3 md:flex-row md:items-center md:justify-between mb-4">
+            <div>
+              <div className="text-sm font-medium text-neutral-300">图片列表</div>
+              <div className="text-xs text-neutral-500">
+                {filteredImages.length > 0
+                  ? `第 ${pageStart + 1}-${pageEnd} 张，共 ${filteredImages.length} 张`
+                  : "没有匹配的图片"}
+              </div>
+            </div>
+            <div className="flex items-center gap-2 flex-wrap">
+              <span className="text-xs text-neutral-500">每页</span>
+              <select
+                value={pageSize}
+                onChange={(e) => setPageSize(Number(e.target.value))}
+                className="px-2 py-1.5 rounded-lg bg-neutral-800 border border-neutral-700 text-xs focus:border-blue-500 focus:outline-none"
+              >
+                {IMAGE_LIST_PAGE_SIZES.map((size) => (
+                  <option key={size} value={size}>{size}</option>
+                ))}
+              </select>
+              <button
+                type="button"
+                onClick={() => setCurrentPage((page) => Math.max(1, page - 1))}
+                disabled={safeCurrentPage <= 1}
+                className="p-1.5 rounded-lg bg-neutral-800 hover:bg-neutral-700 disabled:opacity-40 disabled:cursor-not-allowed transition-colors"
+                aria-label="上一页"
+              >
+                <ChevronLeft className="w-4 h-4" />
+              </button>
+              <span className="min-w-16 text-center text-xs font-mono text-neutral-400">
+                {safeCurrentPage}/{totalPages}
+              </span>
+              <button
+                type="button"
+                onClick={() => setCurrentPage((page) => Math.min(totalPages, page + 1))}
+                disabled={safeCurrentPage >= totalPages}
+                className="p-1.5 rounded-lg bg-neutral-800 hover:bg-neutral-700 disabled:opacity-40 disabled:cursor-not-allowed transition-colors"
+                aria-label="下一页"
+              >
+                <ChevronRight className="w-4 h-4" />
+              </button>
+            </div>
+          </div>
+
+          {filteredImages.length === 0 ? (
+            <p className="text-center text-neutral-500 text-sm py-16">没有匹配的图片</p>
+          ) : (
+            <div className="space-y-4 max-h-[calc(100vh-330px)] min-h-[520px] overflow-y-auto pr-1">
+              <div className="grid grid-cols-2 md:grid-cols-3 2xl:grid-cols-4 gap-3">
+                {visibleImages.map((img) => {
+                  const isSelected = selectedIds.has(img.id);
+                  const preview = compressedPreviews.get(img.id);
+                  return (
+                    <div
+                      key={img.id}
+                      className={`relative rounded-lg border p-2 transition-colors ${
+                        !img.supported
+                          ? "bg-neutral-900/50 border-neutral-800 opacity-60 cursor-not-allowed"
+                          : isSelected
+                          ? "bg-blue-950/30 border-blue-700/50 cursor-pointer"
+                          : "bg-neutral-800/50 border-neutral-700/50 hover:border-neutral-600 cursor-pointer"
+                      }`}
+                      onClick={() => toggleSelect(img.id)}
+                    >
+                      {/* Thumbnail */}
+                      <div className="relative aspect-video bg-neutral-900 rounded mb-2 overflow-hidden">
+                        <img
+                          src={convertFileSrc(img.preview_path)}
+                          alt={img.name}
+                          loading="lazy"
+                          decoding="async"
+                          className="w-full h-full object-contain cursor-zoom-in"
                           onClick={(e) => {
                             e.stopPropagation();
                             setDetailImageId(img.id);
                           }}
-                          className="absolute bottom-1 right-1 p-1 rounded bg-black/60 text-white hover:bg-black/80"
-                          title="查看大图"
-                        >
-                          <ZoomIn className="w-3.5 h-3.5" />
-                        </button>
-                      )}
-                    </div>
-                    {/* Info */}
-                    <div className="space-y-0.5 text-xs">
-                      <div className="flex items-center justify-between">
-                        <span className="text-neutral-500">第 {img.page} 页</span>
-                        <ImageFormatBadge format={img.format} />
-                      </div>
-                      <div className="font-mono text-neutral-300">
-                        {img.width}×{img.height}px
-                      </div>
-                      {preview && (
-                        <div className="font-mono text-blue-300">
-                          → {preview.width}×{preview.height}px
-                        </div>
-                      )}
-                      <div className="flex items-center justify-between">
-                        <span className="inline-flex items-center gap-1 text-neutral-500" title={`提取文件: ${formatKB(img.file_size)}`}>
-                          <span>PDF {formatKB(pdfImageSize(img))}</span>
-                          <PdfSizeHelp />
-                        </span>
-                        {preview && (
-                          <span className="text-green-400">
-                            {formatKB(preview.compressed_size)}
-                            <span className="text-neutral-500 ml-1">
-                              ({compressionRatio(preview.original_size, preview.compressed_size)})
+                        />
+                        {!img.supported && (
+                          <div className="absolute inset-0 flex items-center justify-center">
+                            <span className="px-2 py-0.5 rounded bg-black/70 text-neutral-300 text-[10px] font-medium">
+                              不支持解码
                             </span>
-                          </span>
+                          </div>
+                        )}
+                        {/* Selection checkbox */}
+                        {img.supported && (
+                          <div className="absolute top-1 right-1">
+                            {isSelected ? (
+                              <div className="w-5 h-5 rounded bg-blue-600 flex items-center justify-center">
+                                <CheckSquare className="w-3.5 h-3.5 text-white" />
+                              </div>
+                            ) : (
+                              <div className="w-5 h-5 rounded bg-black/50 border border-neutral-600" />
+                            )}
+                          </div>
+                        )}
+                        {/* Detail/compare button */}
+                        {img.supported && (
+                          <button
+                            onClick={(e) => {
+                              e.stopPropagation();
+                              setDetailImageId(img.id);
+                            }}
+                            className="absolute bottom-1 right-1 p-1 rounded bg-black/60 text-white hover:bg-black/80"
+                            title="查看大图"
+                          >
+                            <ZoomIn className="w-3.5 h-3.5" />
+                          </button>
                         )}
                       </div>
+                      {/* Info */}
+                      <div className="space-y-0.5 text-xs">
+                        <div className="flex items-center justify-between">
+                          <span className="text-neutral-500">第 {img.page} 页</span>
+                          <ImageFormatBadge format={img.format} />
+                        </div>
+                        <div className="font-mono text-neutral-300">
+                          {img.width}×{img.height}px
+                        </div>
+                        {preview && (
+                          <div className="font-mono text-blue-300">
+                            → {preview.width}×{preview.height}px
+                          </div>
+                        )}
+                        <div className="flex items-center justify-between gap-2">
+                          <span className="inline-flex items-center gap-1 text-neutral-500" title={`提取文件: ${formatKB(img.file_size)}`}>
+                            <span>PDF {formatKB(pdfImageSize(img))}</span>
+                            <PdfSizeHelp />
+                          </span>
+                          {preview && (
+                            <span className="inline-flex items-center gap-1 text-green-400">
+                              <span>
+                                {formatKB(preview.compressed_size)}
+                                <span className="text-neutral-500 ml-1">
+                                  ({compressionRatio(preview.original_size, preview.compressed_size)})
+                                </span>
+                              </span>
+                              <button
+                                type="button"
+                                onClick={(e) => {
+                                  e.stopPropagation();
+                                  undoCompressedImage(img.id);
+                                }}
+                                className="p-0.5 rounded text-neutral-500 hover:text-amber-300 hover:bg-neutral-700/80 transition-colors"
+                                title="撤销此图片压缩"
+                                aria-label="撤销此图片压缩"
+                              >
+                                <Undo2 className="w-3.5 h-3.5" />
+                              </button>
+                            </span>
+                          )}
+                        </div>
+                      </div>
                     </div>
-                  </div>
-                );
-              })}
+                  );
+                })}
+              </div>
             </div>
-            {visibleCount < filteredImages.length && (
-              <button
-                onClick={() => setVisibleCount((count) => count + IMAGE_LIST_PAGE_SIZE)}
-                className="w-full px-3 py-2 rounded-lg bg-neutral-800 hover:bg-neutral-700 text-xs text-neutral-300 transition-colors"
-              >
-                加载更多图片 ({visibleCount}/{filteredImages.length})
-              </button>
-            )}
-          </div>
-        )}
-      </div>
+          )}
+        </div>
 
-      {/* Compression panel */}
-      {selectedIds.size > 0 && (
-        <div className="rounded-xl bg-neutral-800/30 border border-neutral-700/50 p-4 space-y-4">
+        {/* Compression panel */}
+        <aside className="rounded-xl bg-neutral-800/30 border border-neutral-700/50 p-4 space-y-4 xl:sticky xl:top-4">
           <div className="flex items-center gap-2 text-sm text-neutral-300">
             <Sliders className="w-4 h-4" />
             <span className="font-medium">压缩设置 (已选中 {selectedIds.size} 张图片)</span>
           </div>
 
-          <div className="grid grid-cols-2 md:grid-cols-4 gap-4">
+          {selectedIds.size === 0 && (
+            <div className="rounded-lg bg-neutral-900/50 border border-neutral-800 p-3 text-xs text-neutral-500">
+              选中图片后即可批量压缩；设置会保留在右侧，便于翻页预览时随时调整。
+            </div>
+          )}
+
+          <div className="grid grid-cols-1 gap-4">
             {/* Format selection */}
             <div>
               <label className="text-xs text-neutral-500 mb-1 block">输出格式</label>
@@ -1140,12 +1281,43 @@ export function CompressImagesTab({
                 className="w-full px-3 py-2 rounded-lg bg-neutral-800 border border-neutral-700 text-sm focus:border-blue-500 focus:outline-none"
               />
             </div>
+
+            {/* Color reduction */}
+            <div>
+              <label className="text-xs text-neutral-500 mb-1 block">颜色简化</label>
+              <select
+                value={colorReduction}
+                onChange={(e) => setColorReduction(e.target.value as ColorReductionMode)}
+                className="w-full px-3 py-2 rounded-lg bg-neutral-800 border border-neutral-700 text-sm focus:border-blue-500 focus:outline-none"
+              >
+                {COLOR_REDUCTION_OPTIONS.map((option) => (
+                  <option key={option.value} value={option.value}>{option.label}</option>
+                ))}
+              </select>
+            </div>
+
+            {/* Binary threshold */}
+            {colorReduction === "binary" && (
+              <div>
+                <label className="text-xs text-neutral-500 mb-1 block">
+                  黑白阈值: {binaryThreshold}
+                </label>
+                <input
+                  type="range"
+                  min={0}
+                  max={255}
+                  value={binaryThreshold}
+                  onChange={(e) => setBinaryThreshold(Number(e.target.value))}
+                  className="w-full accent-blue-500"
+                />
+              </div>
+            )}
           </div>
 
           {/* Compress button */}
           <button
             onClick={handleCompress}
-            disabled={compressing}
+            disabled={compressing || selectedIds.size === 0}
             className="w-full flex items-center justify-center gap-2 px-4 py-2.5 rounded-xl bg-blue-600 hover:bg-blue-500 transition-colors text-sm font-medium text-white disabled:opacity-50"
           >
             {compressing ? (
@@ -1188,6 +1360,28 @@ export function CompressImagesTab({
             </div>
           )}
 
+          {compressedPreviews.size > 0 && (
+            <div className="grid grid-cols-1 md:grid-cols-2 gap-2">
+              <button
+                type="button"
+                onClick={clearSelectedCompressedPreviews}
+                disabled={selectedCompressedCount === 0}
+                className="flex items-center justify-center gap-2 px-4 py-2 rounded-xl bg-neutral-800 hover:bg-neutral-700 disabled:opacity-40 disabled:cursor-not-allowed transition-colors text-sm text-neutral-300"
+              >
+                <Undo2 className="w-4 h-4" />
+                撤销选中图片压缩
+              </button>
+              <button
+                type="button"
+                onClick={clearCompressedPreviews}
+                className="flex items-center justify-center gap-2 px-4 py-2 rounded-xl bg-neutral-800 hover:bg-neutral-700 transition-colors text-sm text-neutral-300"
+              >
+                <Undo2 className="w-4 h-4" />
+                撤销全部图片压缩
+              </button>
+            </div>
+          )}
+
           {/* Export button */}
           {compressedPreviews.size > 0 && (
             <button
@@ -1198,8 +1392,8 @@ export function CompressImagesTab({
               导出压缩后的 PDF
             </button>
           )}
-        </div>
-      )}
+        </aside>
+      </div>
 
       {/* Reset button */}
       <button

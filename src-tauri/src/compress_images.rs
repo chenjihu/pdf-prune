@@ -87,6 +87,36 @@ fn optimize_pdf_object_streams(input_path: &str, output_path: &str) -> Result<()
     ))
 }
 
+fn is_grayscale_pixels(rgb: &[u8]) -> bool {
+    rgb.chunks_exact(3)
+        .all(|px| px[0] == px[1] && px[1] == px[2])
+}
+
+fn is_binary_grayscale_pixels(rgb: &[u8]) -> bool {
+    rgb.chunks_exact(3)
+        .all(|px| px[0] == px[1] && px[1] == px[2] && (px[0] == 0 || px[0] == 255))
+}
+
+fn rgb_to_luma_pixels(rgb: &[u8]) -> Vec<u8> {
+    rgb.chunks_exact(3).map(|px| px[0]).collect()
+}
+
+fn pack_binary_luma_pixels(luma: &[u8], width: u32, height: u32) -> Vec<u8> {
+    let row_bytes = ((width as usize) + 7) / 8;
+    let mut packed = vec![0u8; row_bytes * height as usize];
+
+    for y in 0..height as usize {
+        for x in 0..width as usize {
+            let src = luma[y * width as usize + x];
+            if src != 0 {
+                packed[y * row_bytes + x / 8] |= 0x80 >> (x % 8);
+            }
+        }
+    }
+
+    packed
+}
+
 fn obj_to_f64(obj: &Object) -> Option<f64> {
     match obj {
         Object::Integer(i) => Some(*i as f64),
@@ -1416,7 +1446,9 @@ pub fn write_compressed_images(
                 "jpeg"
             }
             "png" => {
-                // Decode PNG, re-encode as FlateDecode raw pixels
+                // Decode PNG, then store it in the narrowest PDF image representation
+                // that preserves the pixels. This keeps grayscale/binary reductions from
+                // being expanded back to RGB inside the PDF.
                 let img = match image::load_from_memory(&compressed_data) {
                     Ok(i) => i,
                     Err(e) => {
@@ -1427,7 +1459,17 @@ pub fn write_compressed_images(
 
                 let rgb = img.to_rgb8();
                 let raw_pixels = rgb.as_raw();
-                let mut candidate_stream = Stream::new(candidate_dict, raw_pixels.clone());
+                let grayscale = is_grayscale_pixels(raw_pixels);
+                let binary = grayscale && is_binary_grayscale_pixels(raw_pixels);
+                let stream_pixels = if binary {
+                    let luma = rgb_to_luma_pixels(raw_pixels);
+                    pack_binary_luma_pixels(&luma, entry.width, entry.height)
+                } else if grayscale {
+                    rgb_to_luma_pixels(raw_pixels)
+                } else {
+                    raw_pixels.clone()
+                };
+                let mut candidate_stream = Stream::new(candidate_dict, stream_pixels.clone());
 
                 candidate_stream
                     .dict
@@ -1438,18 +1480,29 @@ pub fn write_compressed_images(
                 candidate_stream
                     .dict
                     .set("Height", Object::Integer(entry.height as i64));
+                candidate_stream.dict.set(
+                    "ColorSpace",
+                    Object::Name(if grayscale {
+                        b"DeviceGray".to_vec()
+                    } else {
+                        b"DeviceRGB".to_vec()
+                    }),
+                );
                 candidate_stream
                     .dict
-                    .set("ColorSpace", Object::Name(b"DeviceRGB".to_vec()));
-                candidate_stream
-                    .dict
-                    .set("BitsPerComponent", Object::Integer(8));
+                    .set("BitsPerComponent", Object::Integer(if binary { 1 } else { 8 }));
                 let _ = candidate_stream.dict.remove(b"DecodeParms");
-                candidate_stream.set_plain_content(raw_pixels.clone());
+                candidate_stream.set_plain_content(stream_pixels);
                 let _ = candidate_stream.compress();
                 candidate_dict = candidate_stream.dict;
                 candidate_content = candidate_stream.content;
-                "png"
+                if binary {
+                    "png(1-bit)"
+                } else if grayscale {
+                    "png(gray)"
+                } else {
+                    "png"
+                }
             }
             "webp" => {
                 // WebP not natively supported in PDF — decode and re-encode as JPEG

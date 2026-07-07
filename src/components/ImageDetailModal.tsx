@@ -8,12 +8,14 @@ import {
   AlertCircle,
   Maximize2,
   CircleHelp,
+  Undo2,
 } from "lucide-react";
 import type { ExtractedImageInfo, CompressedImagePreview } from "../types";
 import {
   compressImage,
   formatKB,
   compressionRatio,
+  type ColorReductionMode,
   type CompressFormat,
 } from "../lib/imageCompress";
 import { ImageCompare } from "./ImageCompare";
@@ -22,6 +24,15 @@ const RAW_FORMAT_HELP =
   "raw 表示这张图是 PDF 内部的原始图像数据或特殊编码流，不是可直接保存的 JPEG/PNG/WebP。它通常需要结合宽高、颜色空间、位深和 DecodeParms 才能还原，部分 raw 图片可能无法压缩。";
 const PDF_SIZE_HELP =
   "PDF 大小表示这张图片在 PDF 内部原始图片流中占用的空间。它可能远小于提取出来的 PNG/JPEG 临时文件；导出时会按这个内部流大小判断是否值得替换。";
+const COLOR_REDUCTION_OPTIONS: { value: ColorReductionMode; label: string }[] = [
+  { value: "none", label: "原色" },
+  { value: "grayscale", label: "灰度" },
+  { value: "colors256", label: "256色" },
+  { value: "colors64", label: "64色" },
+  { value: "colors16", label: "16色" },
+  { value: "colors4", label: "4色" },
+  { value: "binary", label: "黑白" },
+];
 
 function pdfImageSize(image: ExtractedImageInfo): number {
   return image.pdf_size ?? image.file_size;
@@ -69,10 +80,13 @@ interface ImageDetailModalProps {
   preview: CompressedImagePreview | null;
   onClose: () => void;
   onCompressed: (id: string, preview: CompressedImagePreview) => void;
+  onUndoCompressed: (id: string) => void;
   defaultFormat: CompressFormat;
   defaultQuality: number;
   defaultScale: number;
   defaultMaxWidth: number;
+  defaultColorReduction: ColorReductionMode;
+  defaultBinaryThreshold: number;
   cacheDir: string | null;
 }
 
@@ -81,16 +95,21 @@ export function ImageDetailModal({
   preview,
   onClose,
   onCompressed,
+  onUndoCompressed,
   defaultFormat,
   defaultQuality,
   defaultScale,
   defaultMaxWidth,
+  defaultColorReduction,
+  defaultBinaryThreshold,
   cacheDir,
 }: ImageDetailModalProps) {
   const [format, setFormat] = useState<CompressFormat>(defaultFormat);
   const [quality, setQuality] = useState(defaultQuality);
   const [scale, setScale] = useState(defaultScale);
   const [maxWidth, setMaxWidth] = useState(defaultMaxWidth);
+  const [colorReduction, setColorReduction] = useState<ColorReductionMode>(defaultColorReduction);
+  const [binaryThreshold, setBinaryThreshold] = useState(defaultBinaryThreshold);
   const [compressing, setCompressing] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [fullscreen, setFullscreen] = useState(false);
@@ -122,6 +141,8 @@ export function ImageDetailModal({
         quality,
         scale: scale / 100,
         maxWidth: maxWidth > 0 ? maxWidth : undefined,
+        colorReduction,
+        binaryThreshold,
       });
 
       const compressedPath = await invoke<string>("write_cache_file", {
@@ -148,7 +169,7 @@ export function ImageDetailModal({
     } finally {
       setCompressing(false);
     }
-  }, [image, format, quality, scale, maxWidth, cacheDir, onCompressed]);
+  }, [image, format, quality, scale, maxWidth, colorReduction, binaryThreshold, cacheDir, onCompressed]);
 
   return (
     <>
@@ -322,6 +343,41 @@ export function ImageDetailModal({
                       className="w-full px-3 py-2 rounded-lg bg-neutral-800 border border-neutral-700 text-sm focus:border-blue-500 focus:outline-none"
                     />
                   </div>
+
+                  {/* Color reduction */}
+                  <div>
+                    <label className="text-xs text-neutral-500 mb-1 block">
+                      颜色简化
+                    </label>
+                    <select
+                      value={colorReduction}
+                      onChange={(e) => setColorReduction(e.target.value as ColorReductionMode)}
+                      className="w-full px-3 py-2 rounded-lg bg-neutral-800 border border-neutral-700 text-sm focus:border-blue-500 focus:outline-none"
+                    >
+                      {COLOR_REDUCTION_OPTIONS.map((option) => (
+                        <option key={option.value} value={option.value}>
+                          {option.label}
+                        </option>
+                      ))}
+                    </select>
+                  </div>
+
+                  {/* Binary threshold */}
+                  {colorReduction === "binary" && (
+                    <div>
+                      <label className="text-xs text-neutral-500 mb-1 block">
+                        黑白阈值: {binaryThreshold}
+                      </label>
+                      <input
+                        type="range"
+                        min={0}
+                        max={255}
+                        value={binaryThreshold}
+                        onChange={(e) => setBinaryThreshold(Number(e.target.value))}
+                        className="w-full accent-blue-500"
+                      />
+                    </div>
+                  )}
                 </div>
 
                 {/* Error */}
@@ -350,6 +406,17 @@ export function ImageDetailModal({
                     </>
                   )}
                 </button>
+
+                {preview && (
+                  <button
+                    type="button"
+                    onClick={() => onUndoCompressed(image.id)}
+                    className="w-full flex items-center justify-center gap-2 px-4 py-2 rounded-xl bg-neutral-800 hover:bg-neutral-700 transition-colors text-sm text-neutral-300"
+                  >
+                    <Undo2 className="w-4 h-4" />
+                    撤销此图片压缩
+                  </button>
+                )}
 
                 {/* Size comparison stats */}
                 {preview && (
