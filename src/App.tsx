@@ -23,6 +23,7 @@ import type { PdfAnalysis, PruneOptions, PruneResult, RemoveImagesResult, ImageI
 import { DEFAULT_PRUNE_OPTIONS, PRUNE_OPTION_LABELS } from "./types";
 import { formatSize, formatPercent, getComponentColor, formatDuration } from "./utils";
 import { CompressImagesTab } from "./components/CompressImagesTab";
+import appIconUrl from "./assets/app-icon.png";
 
 type Tab = "prune" | "removeImages" | "compressImages";
 
@@ -403,9 +404,12 @@ function App() {
       <header className="border-b border-neutral-800 bg-neutral-900/50 backdrop-blur-sm sticky top-0 z-10">
         <div className="max-w-6xl mx-auto px-6 py-4 flex items-center justify-between">
           <div className="flex items-center gap-3">
-            <div className="w-10 h-10 rounded-xl bg-gradient-to-br from-blue-500 to-purple-600 flex items-center justify-center">
-              <Scissors className="w-5 h-5 text-white" />
-            </div>
+            <img
+              src={appIconUrl}
+              alt=""
+              className="w-10 h-10 rounded-xl shadow-sm"
+              draggable={false}
+            />
             <div>
               <h1 className="text-lg font-bold tracking-tight">PDF Prune</h1>
               <p className="text-xs text-neutral-400">PDF 组成分析、瘦身与转换工具</p>
