@@ -245,6 +245,7 @@ export function CompressImagesTab({
   const [maxWidth, setMaxWidth] = useState(0);
   const [colorReduction, setColorReduction] = useState<ColorReductionMode>("none");
   const [binaryThreshold, setBinaryThreshold] = useState(180);
+  const [skipAlreadyCompressed, setSkipAlreadyCompressed] = useState(true);
   const [compressing, setCompressing] = useState(false);
   const [compressProgress, setCompressProgress] = useState<{ current: number; total: number } | null>(null);
   const [compressedPreviews, setCompressedPreviews] = useState<Map<string, CompressedImagePreview>>(new Map());
@@ -256,6 +257,7 @@ export function CompressImagesTab({
   const [exportResult, setExportResult] = useState<CompressImagesResult | null>(null);
   const [exportError, setExportError] = useState<string | null>(null);
   const [compressError, setCompressError] = useState<string | null>(null);
+  const [compressNotice, setCompressNotice] = useState<string | null>(null);
   const [pdfFileSize, setPdfFileSize] = useState<number | null>(null);
   const [pageSize, setPageSize] = useState(50);
   const [currentPage, setCurrentPage] = useState(1);
@@ -389,13 +391,33 @@ export function CompressImagesTab({
   const handleCompress = useCallback(async () => {
     if (!extractedImages || selectedIds.size === 0) return;
 
-    setCompressing(true);
-    setCompressError(null);
-    setCompressedPreviews(new Map());
-    setCompressProgress({ current: 0, total: selectedIds.size });
+    const selectedTargets = extractedImages.filter((img) => selectedIds.has(img.id));
+    const targets = skipAlreadyCompressed
+      ? selectedTargets.filter((img) => !compressedPreviews.has(img.id))
+      : selectedTargets;
+    const skippedCount = selectedTargets.length - targets.length;
 
-    const targets = extractedImages.filter((img) => selectedIds.has(img.id));
-    const previews = new Map<string, CompressedImagePreview>();
+    setCompressError(null);
+    setCompressNotice(null);
+
+    if (targets.length === 0) {
+      setCompressProgress(null);
+      setCompressNotice("选中的图片都已压缩，已跳过。");
+      return;
+    }
+
+    setCompressing(true);
+    setExportResult(null);
+    setExportError(null);
+    setCompressProgress({ current: 0, total: targets.length });
+
+    const previews = new Map<string, CompressedImagePreview>(compressedPreviews);
+    if (!skipAlreadyCompressed) {
+      for (const img of targets) {
+        previews.delete(img.id);
+      }
+      setCompressedPreviews(new Map(previews));
+    }
 
     for (let i = 0; i < targets.length; i++) {
       const img = targets[i];
@@ -445,7 +467,22 @@ export function CompressImagesTab({
 
     setCompressing(false);
     setCompressProgress(null);
-  }, [extractedImages, selectedIds, compressFormat, quality, scale, maxWidth, colorReduction, binaryThreshold, cacheDir]);
+    if (skippedCount > 0) {
+      setCompressNotice(`已跳过 ${skippedCount} 张已压缩图片，本次处理 ${targets.length} 张。`);
+    }
+  }, [
+    extractedImages,
+    selectedIds,
+    skipAlreadyCompressed,
+    compressedPreviews,
+    compressFormat,
+    quality,
+    scale,
+    maxWidth,
+    colorReduction,
+    binaryThreshold,
+    cacheDir,
+  ]);
 
   const handleExport = useCallback(async () => {
     if (!inputPath || compressedPreviews.size === 0) return;
@@ -500,6 +537,7 @@ export function CompressImagesTab({
     setExportResult(null);
     setExportError(null);
     setCompressError(null);
+    setCompressNotice(null);
     onReset();
   }, [onReset]);
 
@@ -562,6 +600,7 @@ export function CompressImagesTab({
     setCompressedPreviews(new Map());
     setExportResult(null);
     setExportError(null);
+    setCompressNotice(null);
   }, []);
 
   const clearSelectedCompressedPreviews = useCallback(() => {
@@ -574,6 +613,7 @@ export function CompressImagesTab({
     });
     setExportResult(null);
     setExportError(null);
+    setCompressNotice(null);
   }, [selectedIds]);
 
   const selectedCompressedCount = useMemo(() => {
@@ -583,6 +623,16 @@ export function CompressImagesTab({
     }
     return count;
   }, [selectedIds, compressedPreviews]);
+
+  const compressButtonLabel = useMemo(() => {
+    if (compressedPreviews.size === 0) return "开始压缩";
+    if (skipAlreadyCompressed) {
+      return selectedCompressedCount === selectedIds.size && selectedIds.size > 0
+        ? "已全部压缩"
+        : "压缩未处理图片";
+    }
+    return "重新压缩选中图片";
+  }, [compressedPreviews.size, selectedCompressedCount, selectedIds.size, skipAlreadyCompressed]);
 
   // ===== Render =====
 
@@ -1393,6 +1443,22 @@ export function CompressImagesTab({
                 />
               </div>
             )}
+
+            {/* Skip already compressed */}
+            <label className="flex items-center justify-between gap-3 rounded-lg bg-neutral-900/50 border border-neutral-800 p-3">
+              <div className="min-w-0">
+                <div className="text-sm text-neutral-300">跳过已压缩</div>
+                <div className="text-xs text-neutral-500 mt-0.5">
+                  选中的图片已有压缩结果时，本次批量压缩不再重新处理。
+                </div>
+              </div>
+              <input
+                type="checkbox"
+                checked={skipAlreadyCompressed}
+                onChange={(e) => setSkipAlreadyCompressed(e.target.checked)}
+                className="w-4 h-4 rounded accent-blue-600 flex-shrink-0"
+              />
+            </label>
           </div>
 
           {/* Compress button */}
@@ -1409,10 +1475,17 @@ export function CompressImagesTab({
             ) : (
               <>
                 <Sliders className="w-4 h-4" />
-                {compressedPreviews.size > 0 ? "重新压缩" : "开始压缩"}
+                {compressButtonLabel}
               </>
             )}
           </button>
+
+          {compressNotice && (
+            <div className="flex items-start gap-2 p-3 rounded-lg bg-blue-950/30 border border-blue-800/40 text-blue-100 text-xs">
+              <CheckCircle2 className="w-4 h-4 flex-shrink-0 mt-0.5" />
+              <span>{compressNotice}</span>
+            </div>
+          )}
 
           {compressError && (
             <div className="flex items-start gap-2 p-3 rounded-lg bg-red-950/40 border border-red-800/50 text-red-200 text-xs">
