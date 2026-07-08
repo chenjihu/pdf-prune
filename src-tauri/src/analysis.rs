@@ -1,7 +1,8 @@
 use lopdf::{Dictionary, Document, Object, ObjectId, Stream};
 use rayon::prelude::*;
 use serde::Serialize;
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
+use std::hash::Hasher;
 use std::path::Path;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::Arc;
@@ -24,6 +25,26 @@ pub struct FontInfo {
 }
 
 #[derive(Debug, Serialize, Clone)]
+pub struct DuplicateImageObject {
+    pub object_id: String,
+    pub width: u32,
+    pub height: u32,
+    pub pdf_size: usize,
+    pub pages: Vec<u32>,
+    pub occurrences: usize,
+}
+
+#[derive(Debug, Serialize, Clone)]
+pub struct DuplicateImageGroup {
+    pub fingerprint: String,
+    pub width: u32,
+    pub height: u32,
+    pub objects: Vec<DuplicateImageObject>,
+    pub total_pdf_size: usize,
+    pub estimated_savings: usize,
+}
+
+#[derive(Debug, Serialize, Clone)]
 pub struct PdfAnalysis {
     pub file_path: String,
     pub file_size: usize,
@@ -34,6 +55,9 @@ pub struct PdfAnalysis {
     pub total_object_count: usize,
     pub unused_object_count: usize,
     pub potential_savings: usize,
+    pub duplicate_image_groups: Vec<DuplicateImageGroup>,
+    pub reused_image_objects: Vec<DuplicateImageObject>,
+    pub duplicate_image_savings: usize,
 }
 
 fn estimate_dict_size(dict: &Dictionary) -> usize {
@@ -148,6 +172,294 @@ fn collect_qpdf_refs(value: &serde_json::Value, refs: &mut HashSet<ObjectId>) {
         }
         _ => {}
     }
+}
+
+#[derive(Debug, Clone)]
+struct ImageRefInfo {
+    object_id: ObjectId,
+    width: u32,
+    height: u32,
+    pages: HashSet<u32>,
+    occurrences: usize,
+}
+
+fn format_object_id(id: ObjectId) -> String {
+    format!("{} {}", id.0, id.1)
+}
+
+fn parse_qpdf_image_line(line: &str, page: u32) -> Option<ImageRefInfo> {
+    let trimmed = line.trim();
+    if !trimmed.starts_with('/') {
+        return None;
+    }
+
+    let (_, rest) = trimmed.split_once(':')?;
+    let (ref_part, dim_part) = rest.trim().split_once(',')?;
+    let object_id = parse_qpdf_ref(ref_part.trim())?;
+
+    let mut dim_tokens = dim_part.split_whitespace();
+    let width = dim_tokens.next()?.parse::<u32>().ok()?;
+    if dim_tokens.next()? != "x" {
+        return None;
+    }
+    let height = dim_tokens.next()?.parse::<u32>().ok()?;
+
+    let mut pages = HashSet::new();
+    pages.insert(page);
+    Some(ImageRefInfo {
+        object_id,
+        width,
+        height,
+        pages,
+        occurrences: 1,
+    })
+}
+
+fn collect_image_refs_with_qpdf(path: &Path) -> Result<HashMap<ObjectId, ImageRefInfo>, String> {
+    let output = std::process::Command::new("qpdf")
+        .args(["--show-pages", "--with-images"])
+        .arg(path)
+        .output()
+        .map_err(|e| format!("qpdf 图片引用扫描失败: {}", e))?;
+
+    if output.stdout.is_empty() {
+        return Err(format!(
+            "qpdf 图片引用扫描无输出，退出码: {:?}",
+            output.status.code()
+        ));
+    }
+
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let mut current_page = 0u32;
+    let mut images: HashMap<ObjectId, ImageRefInfo> = HashMap::new();
+
+    for line in stdout.lines() {
+        let trimmed = line.trim();
+        if let Some(rest) = trimmed.strip_prefix("page ") {
+            if let Some((page_num, _)) = rest.split_once(':') {
+                current_page = page_num.trim().parse::<u32>().unwrap_or(0);
+            }
+            continue;
+        }
+
+        if current_page == 0 {
+            continue;
+        }
+
+        if let Some(info) = parse_qpdf_image_line(trimmed, current_page) {
+            images
+                .entry(info.object_id)
+                .and_modify(|existing| {
+                    existing.pages.insert(current_page);
+                    existing.occurrences += 1;
+                })
+                .or_insert(info);
+        }
+    }
+
+    Ok(images)
+}
+
+fn hash_bytes_and_dict(bytes: &[u8], dict: &serde_json::Value) -> String {
+    let mut hasher = std::collections::hash_map::DefaultHasher::new();
+    hasher.write(bytes);
+    if let Ok(dict_bytes) = serde_json::to_vec(dict) {
+        hasher.write(&dict_bytes);
+    }
+    format!("{:016x}", hasher.finish())
+}
+
+fn qpdf_object_key_to_id(key: &str) -> Option<ObjectId> {
+    key.strip_prefix("obj:")
+        .and_then(|s| parse_qpdf_ref(s.trim()))
+}
+
+fn hash_candidate_image_streams(
+    path: &Path,
+    candidate_ids: &[ObjectId],
+) -> Result<HashMap<ObjectId, (String, usize)>, String> {
+    if candidate_ids.is_empty() {
+        return Ok(HashMap::new());
+    }
+
+    let temp_dir = tempfile::Builder::new()
+        .prefix("pdf-prune-duplicate-images-")
+        .tempdir()
+        .map_err(|e| format!("创建重复图片分析临时目录失败: {}", e))?;
+
+    let mut hashes: HashMap<ObjectId, (String, usize)> = HashMap::new();
+
+    for (chunk_idx, chunk) in candidate_ids.chunks(200).enumerate() {
+        let prefix = temp_dir
+            .path()
+            .join(format!("stream-{}-", chunk_idx))
+            .to_string_lossy()
+            .to_string();
+
+        let mut cmd = std::process::Command::new("qpdf");
+        cmd.args([
+            "--json",
+            "--json-key=qpdf",
+            "--json-stream-data=file",
+            "--decode-level=none",
+        ]);
+        cmd.arg(format!("--json-stream-prefix={}", prefix));
+        for id in chunk {
+            cmd.arg(format!("--json-object={},{}", id.0, id.1));
+        }
+        cmd.arg(path);
+
+        let output = cmd
+            .output()
+            .map_err(|e| format!("qpdf 图片 stream 提取失败: {}", e))?;
+        if output.stdout.is_empty() {
+            return Err(format!(
+                "qpdf 图片 stream 提取无输出，退出码: {:?}",
+                output.status.code()
+            ));
+        }
+
+        let json: serde_json::Value = serde_json::from_slice(&output.stdout)
+            .map_err(|e| format!("解析 qpdf 图片 stream JSON 失败: {}", e))?;
+        let Some(objects) = json
+            .get("qpdf")
+            .and_then(|v| v.as_array())
+            .and_then(|arr| arr.get(1))
+            .and_then(|v| v.as_object())
+        else {
+            continue;
+        };
+
+        for (key, value) in objects {
+            let Some(object_id) = qpdf_object_key_to_id(key) else {
+                continue;
+            };
+            let Some(stream) = value.get("stream") else {
+                continue;
+            };
+            let Some(datafile) = stream.get("datafile").and_then(|v| v.as_str()) else {
+                continue;
+            };
+            let data = match std::fs::read(datafile) {
+                Ok(data) => data,
+                Err(_) => continue,
+            };
+            let dict = stream
+                .get("dict")
+                .cloned()
+                .unwrap_or_else(|| serde_json::Value::Object(serde_json::Map::new()));
+            let hash = hash_bytes_and_dict(&data, &dict);
+            hashes.insert(object_id, (hash, data.len()));
+        }
+    }
+
+    Ok(hashes)
+}
+
+fn duplicate_object_from_ref(info: &ImageRefInfo, pdf_size: usize) -> DuplicateImageObject {
+    let mut pages: Vec<u32> = info.pages.iter().copied().collect();
+    pages.sort_unstable();
+    DuplicateImageObject {
+        object_id: format_object_id(info.object_id),
+        width: info.width,
+        height: info.height,
+        pdf_size,
+        pages,
+        occurrences: info.occurrences,
+    }
+}
+
+fn analyze_duplicate_images(path: &Path) -> (Vec<DuplicateImageGroup>, Vec<DuplicateImageObject>, usize) {
+    let image_refs = match collect_image_refs_with_qpdf(path) {
+        Ok(images) => images,
+        Err(e) => {
+            eprintln!("duplicate image analysis skipped: {}", e);
+            return (Vec::new(), Vec::new(), 0);
+        }
+    };
+
+    let mut by_dimensions: HashMap<(u32, u32), Vec<ObjectId>> = HashMap::new();
+    for (id, info) in &image_refs {
+        by_dimensions
+            .entry((info.width, info.height))
+            .or_default()
+            .push(*id);
+    }
+
+    let candidate_ids: Vec<ObjectId> = by_dimensions
+        .values()
+        .filter(|ids| ids.len() > 1)
+        .flat_map(|ids| ids.iter().copied())
+        .collect();
+
+    let stream_hashes = match hash_candidate_image_streams(path, &candidate_ids) {
+        Ok(hashes) => hashes,
+        Err(e) => {
+            eprintln!("duplicate image hash analysis skipped: {}", e);
+            HashMap::new()
+        }
+    };
+
+    let mut by_hash: HashMap<String, Vec<ObjectId>> = HashMap::new();
+    for (id, (hash, _)) in &stream_hashes {
+        by_hash.entry(hash.clone()).or_default().push(*id);
+    }
+
+    let mut groups: Vec<DuplicateImageGroup> = by_hash
+        .into_iter()
+        .filter_map(|(fingerprint, ids)| {
+            if ids.len() < 2 {
+                return None;
+            }
+            let first_info = image_refs.get(&ids[0])?;
+            let mut objects: Vec<DuplicateImageObject> = ids
+                .iter()
+                .filter_map(|id| {
+                    let info = image_refs.get(id)?;
+                    let size = stream_hashes.get(id).map(|(_, size)| *size).unwrap_or(0);
+                    Some(duplicate_object_from_ref(info, size))
+                })
+                .collect();
+            objects.sort_by(|a, b| b.pdf_size.cmp(&a.pdf_size));
+            let total_pdf_size = objects.iter().map(|obj| obj.pdf_size).sum::<usize>();
+            let keep_size = objects.iter().map(|obj| obj.pdf_size).min().unwrap_or(0);
+            Some(DuplicateImageGroup {
+                fingerprint,
+                width: first_info.width,
+                height: first_info.height,
+                objects,
+                total_pdf_size,
+                estimated_savings: total_pdf_size.saturating_sub(keep_size),
+            })
+        })
+        .collect();
+
+    groups.sort_by(|a, b| b.estimated_savings.cmp(&a.estimated_savings));
+
+    let duplicate_ids: HashSet<String> = groups
+        .iter()
+        .flat_map(|group| group.objects.iter().map(|obj| obj.object_id.clone()))
+        .collect();
+
+    let mut reused: Vec<DuplicateImageObject> = image_refs
+        .values()
+        .filter(|info| info.occurrences > 1 && !duplicate_ids.contains(&format_object_id(info.object_id)))
+        .map(|info| {
+            let pdf_size = stream_hashes
+                .get(&info.object_id)
+                .map(|(_, size)| *size)
+                .unwrap_or(0);
+            duplicate_object_from_ref(info, pdf_size)
+        })
+        .collect();
+    reused.sort_by(|a, b| b.occurrences.cmp(&a.occurrences));
+
+    let savings = groups
+        .iter()
+        .map(|group| group.estimated_savings)
+        .sum::<usize>();
+
+    (groups, reused, savings)
 }
 
 /// Fast analysis using qpdf JSON output. Avoids loading the entire PDF with lopdf.
@@ -493,6 +805,10 @@ fn analyze_with_qpdf(
         },
     ];
 
+    progress(92, "正在分析重复图片...");
+    let (duplicate_image_groups, reused_image_objects, duplicate_image_savings) =
+        analyze_duplicate_images(path);
+
     progress(95, "正在汇总结果...");
 
     Ok(PdfAnalysis {
@@ -504,6 +820,9 @@ fn analyze_with_qpdf(
         total_object_count,
         unused_object_count,
         potential_savings,
+        duplicate_image_groups,
+        reused_image_objects,
+        duplicate_image_savings,
         fonts,
     })
 }
@@ -1122,6 +1441,10 @@ pub fn analyze_pdf(
         description: "孤立的、未被引用的对象（可安全删除）".to_string(),
     });
 
+    progress_arc(92, "正在分析重复图片...");
+    let (duplicate_image_groups, reused_image_objects, duplicate_image_savings) =
+        analyze_duplicate_images(path);
+
     Ok(PdfAnalysis {
         file_path: file_path.to_string(),
         file_size,
@@ -1132,5 +1455,8 @@ pub fn analyze_pdf(
         total_object_count,
         unused_object_count,
         potential_savings,
+        duplicate_image_groups,
+        reused_image_objects,
+        duplicate_image_savings,
     })
 }

@@ -67,6 +67,12 @@ function parseExtractProgress(pct: number, msg: string, previous: ExtractProgres
   return { pct, msg, completed, total, active, workerThreads };
 }
 
+function formatPageList(pages: number[]): string {
+  if (pages.length === 0) return "-";
+  if (pages.length <= 6) return pages.join(", ");
+  return `${pages.slice(0, 6).join(", ")} 等 ${pages.length} 页`;
+}
+
 function App() {
   const [tab, setTab] = useState<Tab>("prune");
   const [analysis, setAnalysis] = useState<PdfAnalysis | null>(null);
@@ -626,6 +632,125 @@ function App() {
                   );
                 })}
               </div>
+            </div>
+
+            {/* Duplicate image analysis */}
+            <div className="rounded-2xl bg-neutral-900/50 border border-neutral-800 p-6">
+              <div className="flex items-center justify-between mb-5">
+                <div>
+                  <h3 className="font-bold text-base">重复图片分析</h3>
+                  <p className="text-xs text-neutral-500 mt-1">
+                    按 PDF 原始图片流指纹识别不同对象中的重复保存图片
+                  </p>
+                </div>
+                <div className="text-right">
+                  <div className="text-xs text-neutral-500">重复保存预计可节省</div>
+                  <div className="text-lg font-bold text-green-400">
+                    {formatSize(analysis.duplicate_image_savings)}
+                  </div>
+                </div>
+              </div>
+
+              <div className="grid grid-cols-3 gap-4 mb-5">
+                <div className="text-center p-3 rounded-xl bg-neutral-800/30">
+                  <div className="text-xs text-neutral-500">重复保存组</div>
+                  <div className="text-lg font-bold font-mono text-amber-400">
+                    {analysis.duplicate_image_groups.length}
+                  </div>
+                </div>
+                <div className="text-center p-3 rounded-xl bg-neutral-800/30">
+                  <div className="text-xs text-neutral-500">已复用对象</div>
+                  <div className="text-lg font-bold font-mono text-blue-400">
+                    {analysis.reused_image_objects.length}
+                  </div>
+                </div>
+                <div className="text-center p-3 rounded-xl bg-neutral-800/30">
+                  <div className="text-xs text-neutral-500">检测方式</div>
+                  <div className="text-sm font-bold text-neutral-300">原始流指纹</div>
+                </div>
+              </div>
+
+              {analysis.duplicate_image_groups.length === 0 && analysis.reused_image_objects.length === 0 && (
+                <div className="rounded-xl bg-neutral-800/30 p-4 text-sm text-neutral-400">
+                  未发现重复保存的图片，也没有发现多页复用的图片对象。
+                </div>
+              )}
+
+              {analysis.duplicate_image_groups.length > 0 && (
+                <div className="mb-5">
+                  <h4 className="text-sm font-medium mb-3 text-neutral-300">重复保存的图片</h4>
+                  <div className="space-y-3 max-h-72 overflow-auto pr-1">
+                    {analysis.duplicate_image_groups.map((group) => (
+                      <div
+                        key={group.fingerprint}
+                        className="rounded-xl bg-amber-950/20 border border-amber-800/30 p-4"
+                      >
+                        <div className="flex items-center justify-between gap-3 mb-3">
+                          <div className="flex items-center gap-2">
+                            <Images className="w-4 h-4 text-amber-400" />
+                            <span className="text-sm font-medium">
+                              {group.width}×{group.height}px · {group.objects.length} 个对象
+                            </span>
+                          </div>
+                          <div className="text-right">
+                            <div className="text-xs text-neutral-500">预计可节省</div>
+                            <div className="font-mono text-sm text-green-400">
+                              {formatSize(group.estimated_savings)}
+                            </div>
+                          </div>
+                        </div>
+                        <div className="space-y-2">
+                          {group.objects.map((obj) => (
+                            <div
+                              key={obj.object_id}
+                              className="flex items-center justify-between gap-3 rounded-lg bg-neutral-900/50 px-3 py-2 text-xs"
+                            >
+                              <div className="min-w-0">
+                                <span className="font-mono text-neutral-200">{obj.object_id}</span>
+                                <span className="text-neutral-500 ml-2">
+                                  页码: {formatPageList(obj.pages)}
+                                </span>
+                              </div>
+                              <div className="font-mono text-neutral-400 flex-shrink-0">
+                                {formatSize(obj.pdf_size)}
+                              </div>
+                            </div>
+                          ))}
+                        </div>
+                      </div>
+                    ))}
+                  </div>
+                </div>
+              )}
+
+              {analysis.reused_image_objects.length > 0 && (
+                <div>
+                  <h4 className="text-sm font-medium mb-3 text-neutral-300">已经复用的图片对象</h4>
+                  <div className="space-y-2 max-h-56 overflow-auto pr-1">
+                    {analysis.reused_image_objects.map((obj) => (
+                      <div
+                        key={obj.object_id}
+                        className="flex items-center justify-between gap-3 rounded-xl bg-blue-950/20 border border-blue-800/30 p-3 text-sm"
+                      >
+                        <div className="min-w-0">
+                          <div className="flex items-center gap-2">
+                            <span className="font-mono text-neutral-200">{obj.object_id}</span>
+                            <span className="text-xs px-1.5 py-0.5 rounded bg-blue-900/60 text-blue-200">
+                              已复用 {obj.occurrences} 次
+                            </span>
+                          </div>
+                          <div className="text-xs text-neutral-500 mt-1">
+                            {obj.width}×{obj.height}px · 页码: {formatPageList(obj.pages)}
+                          </div>
+                        </div>
+                        <div className="text-xs text-blue-300 flex-shrink-0">
+                          无需去重
+                        </div>
+                      </div>
+                    ))}
+                  </div>
+                </div>
+              )}
             </div>
 
             {/* Font details section */}

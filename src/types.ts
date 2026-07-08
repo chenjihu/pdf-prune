@@ -13,6 +13,24 @@ export interface FontInfo {
   object_id: string;
 }
 
+export interface DuplicateImageObject {
+  object_id: string;
+  width: number;
+  height: number;
+  pdf_size: number;
+  pages: number[];
+  occurrences: number;
+}
+
+export interface DuplicateImageGroup {
+  fingerprint: string;
+  width: number;
+  height: number;
+  objects: DuplicateImageObject[];
+  total_pdf_size: number;
+  estimated_savings: number;
+}
+
 export interface PdfAnalysis {
   file_path: string;
   file_size: number;
@@ -23,6 +41,9 @@ export interface PdfAnalysis {
   total_object_count: number;
   unused_object_count: number;
   potential_savings: number;
+  duplicate_image_groups: DuplicateImageGroup[];
+  reused_image_objects: DuplicateImageObject[];
+  duplicate_image_savings: number;
 }
 
 export interface PruneOptions {
