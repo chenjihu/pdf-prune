@@ -1,10 +1,12 @@
 mod analysis;
 mod compress_images;
+mod dependencies;
 mod prune;
 mod remove_images;
 
 use analysis::PdfAnalysis;
 use compress_images::{CompressImagesResult, CompressedImageEntry, ExtractedImageInfo};
+use dependencies::RuntimeDependencyCheck;
 use prune::{PruneOptions, PruneResult};
 use remove_images::{ImageInfo, ImageSize, RemoveImagesResult};
 use std::sync::atomic::AtomicBool;
@@ -19,6 +21,11 @@ struct ExtractImagesDetailProgress {
     total: usize,
     active: usize,
     worker_threads: usize,
+}
+
+#[tauri::command]
+async fn check_runtime_dependencies() -> Result<RuntimeDependencyCheck, String> {
+    Ok(dependencies::check_runtime_dependencies())
 }
 
 #[tauri::command]
@@ -245,6 +252,7 @@ pub fn run() {
             get_file_size,
             write_cache_file,
             clear_cache_dir,
+            check_runtime_dependencies,
             write_compressed_images
         ])
         .run(tauri::generate_context!())

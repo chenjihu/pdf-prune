@@ -18,8 +18,20 @@ import {
   Images,
   Plus,
   X,
+  Copy,
+  RefreshCw,
+  Terminal,
 } from "lucide-react";
-import type { PdfAnalysis, PruneOptions, PruneResult, RemoveImagesResult, ImageInfo, ImageSize, ExtractedImageInfo } from "./types";
+import type {
+  PdfAnalysis,
+  PruneOptions,
+  PruneResult,
+  RemoveImagesResult,
+  ImageInfo,
+  ImageSize,
+  ExtractedImageInfo,
+  RuntimeDependencyCheck,
+} from "./types";
 import { DEFAULT_PRUNE_OPTIONS, PRUNE_OPTION_LABELS } from "./types";
 import { formatSize, formatPercent, getComponentColor, formatDuration } from "./utils";
 import { CompressImagesTab } from "./components/CompressImagesTab";
@@ -73,6 +85,82 @@ function formatPageList(pages: number[]): string {
   return `${pages.slice(0, 6).join(", ")} 等 ${pages.length} 页`;
 }
 
+interface RuntimeDependencyBannerProps {
+  dependencyCheck: RuntimeDependencyCheck;
+  checking: boolean;
+  copyMessage: string | null;
+  onCopyInstallCommand: () => void;
+  onRefresh: () => void;
+}
+
+function RuntimeDependencyBanner({
+  dependencyCheck,
+  checking,
+  copyMessage,
+  onCopyInstallCommand,
+  onRefresh,
+}: RuntimeDependencyBannerProps) {
+  const missingDependencies = dependencyCheck.dependencies.filter((dependency) => !dependency.present);
+  if (missingDependencies.length === 0) return null;
+
+  return (
+    <div className="mb-6 rounded-xl border border-amber-800/60 bg-amber-950/25 p-4 text-amber-100">
+      <div className="flex items-start gap-3">
+        <AlertCircle className="w-5 h-5 flex-shrink-0 mt-0.5 text-amber-300" />
+        <div className="min-w-0 flex-1">
+          <div className="flex flex-col gap-3 md:flex-row md:items-start md:justify-between">
+            <div>
+              <p className="text-sm font-medium">缺少运行依赖</p>
+              <p className="text-xs text-amber-100/75 mt-1">
+                部分 PDF 快速分析、图片提取或回写功能需要第三方命令行工具。安装后点击“重新检测”即可继续使用最佳性能路径。
+              </p>
+            </div>
+            <div className="flex flex-wrap items-center gap-2">
+              <button
+                type="button"
+                onClick={onCopyInstallCommand}
+                className="flex items-center gap-2 rounded-lg bg-amber-500/15 px-3 py-1.5 text-xs text-amber-100 hover:bg-amber-500/25 transition-colors"
+              >
+                <Copy className="w-3.5 h-3.5" />
+                复制安装命令
+              </button>
+              <button
+                type="button"
+                onClick={onRefresh}
+                disabled={checking}
+                className="flex items-center gap-2 rounded-lg bg-neutral-900/60 px-3 py-1.5 text-xs text-amber-100 hover:bg-neutral-800 disabled:opacity-50 transition-colors"
+              >
+                <RefreshCw className={`w-3.5 h-3.5 ${checking ? "animate-spin" : ""}`} />
+                重新检测
+              </button>
+            </div>
+          </div>
+
+          <div className="mt-3 rounded-lg border border-amber-800/40 bg-neutral-950/45 p-3">
+            <div className="flex items-start gap-2 text-xs text-neutral-200">
+              <Terminal className="w-4 h-4 flex-shrink-0 text-amber-300" />
+              <code className="break-all">{dependencyCheck.install_command}</code>
+            </div>
+            {copyMessage && (
+              <div className="text-[11px] text-amber-100/70 mt-2">{copyMessage}</div>
+            )}
+          </div>
+
+          <div className="mt-3 grid grid-cols-1 md:grid-cols-3 gap-2">
+            {missingDependencies.map((dependency) => (
+              <div key={dependency.key} className="rounded-lg bg-neutral-950/35 border border-amber-900/30 p-3">
+                <div className="text-xs font-medium text-amber-100">{dependency.name}</div>
+                <div className="text-[11px] text-amber-100/65 mt-1">{dependency.purpose}</div>
+                <div className="text-[11px] text-neutral-500 mt-2">{dependency.install_hint}</div>
+              </div>
+            ))}
+          </div>
+        </div>
+      </div>
+    </div>
+  );
+}
+
 function App() {
   const [tab, setTab] = useState<Tab>("prune");
   const [analysis, setAnalysis] = useState<PdfAnalysis | null>(null);
@@ -108,6 +196,32 @@ function App() {
   const [cacheMessage, setCacheMessage] = useState<string | null>(null);
   const [cacheError, setCacheError] = useState<string | null>(null);
   const [clearingCache, setClearingCache] = useState(false);
+  const [dependencyCheck, setDependencyCheck] = useState<RuntimeDependencyCheck | null>(null);
+  const [checkingDependencies, setCheckingDependencies] = useState(false);
+  const [dependencyCopyMessage, setDependencyCopyMessage] = useState<string | null>(null);
+
+  const refreshRuntimeDependencies = useCallback(async () => {
+    try {
+      setCheckingDependencies(true);
+      const result = await invoke<RuntimeDependencyCheck>("check_runtime_dependencies");
+      setDependencyCheck(result);
+      setDependencyCopyMessage(null);
+    } catch (e) {
+      setDependencyCopyMessage(`依赖检测失败: ${String(e)}`);
+    } finally {
+      setCheckingDependencies(false);
+    }
+  }, []);
+
+  const copyInstallCommand = useCallback(async () => {
+    if (!dependencyCheck?.install_command) return;
+    try {
+      await navigator.clipboard.writeText(dependencyCheck.install_command);
+      setDependencyCopyMessage("安装命令已复制。请在终端执行，完成后回到应用重新检测。");
+    } catch {
+      setDependencyCopyMessage("复制失败，请手动复制上方安装命令。");
+    }
+  }, [dependencyCheck]);
 
   const openPdf = useCallback(async () => {
     try {
@@ -338,6 +452,10 @@ function App() {
       .catch((e) => setCacheError(String(e)));
   }, []);
 
+  useEffect(() => {
+    refreshRuntimeDependencies();
+  }, [refreshRuntimeDependencies]);
+
   // Listen for progress events
   useEffect(() => {
     let unlistenAnalyze: UnlistenFn | null = null;
@@ -455,6 +573,16 @@ function App() {
       </header>
 
       <main className="flex-1 max-w-6xl w-full mx-auto px-6 py-8">
+        {dependencyCheck?.has_missing_required && (
+          <RuntimeDependencyBanner
+            dependencyCheck={dependencyCheck}
+            checking={checkingDependencies}
+            copyMessage={dependencyCopyMessage}
+            onCopyInstallCommand={copyInstallCommand}
+            onRefresh={refreshRuntimeDependencies}
+          />
+        )}
+
         {/* ===== Tab: PDF Prune ===== */}
         {tab === "prune" && (
           <>

@@ -46,6 +46,24 @@ export interface PdfAnalysis {
   duplicate_image_savings: number;
 }
 
+export interface RuntimeDependency {
+  key: string;
+  name: string;
+  command: string;
+  present: boolean;
+  path: string | null;
+  version: string | null;
+  purpose: string;
+  install_hint: string;
+}
+
+export interface RuntimeDependencyCheck {
+  platform: string;
+  has_missing_required: boolean;
+  install_command: string;
+  dependencies: RuntimeDependency[];
+}
+
 export interface PruneOptions {
   remove_unused_objects: boolean;
   remove_metadata: boolean;
