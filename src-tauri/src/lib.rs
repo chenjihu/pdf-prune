@@ -236,8 +236,33 @@ async fn write_compressed_images(
     result
 }
 
+/// On macOS, GUI apps launched from Finder/Spotlight inherit a minimal PATH
+/// (/usr/bin:/bin:/usr/sbin:/sbin) that excludes Homebrew directories.
+/// Prepend common Homebrew paths so that qpdf, pdfimages, pdfinfo etc. are found.
+fn setup_path() {
+    let extra_dirs: &[&str] = if cfg!(target_os = "macos") {
+        &["/opt/homebrew/bin", "/usr/local/bin"]
+    } else {
+        &[]
+    };
+
+    let current = std::env::var_os("PATH").unwrap_or_default();
+    let mut dirs: Vec<std::path::PathBuf> = std::env::split_paths(&current).collect();
+
+    for d in extra_dirs {
+        let pb = std::path::PathBuf::from(d);
+        if !dirs.contains(&pb) {
+            dirs.insert(0, pb);
+        }
+    }
+
+    let new_path = std::env::join_paths(dirs).unwrap_or(current);
+    std::env::set_var("PATH", new_path);
+}
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
+    setup_path();
     tauri::Builder::default()
         .plugin(tauri_plugin_opener::init())
         .plugin(tauri_plugin_dialog::init())
