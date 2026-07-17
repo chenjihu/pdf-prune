@@ -174,6 +174,7 @@ export interface CompressedImageEntry {
   width: number;
   height: number;
   original_size?: number;
+  force_replace?: boolean;
 }
 
 export interface CompressImagesResult {
@@ -193,4 +194,5 @@ export interface CompressedImagePreview {
   format: string;
   width: number;
   height: number;
+  force_replace?: boolean;
 }

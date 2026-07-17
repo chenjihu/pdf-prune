@@ -1,5 +1,7 @@
 import { useState, useCallback, useEffect } from "react";
 import { convertFileSrc, invoke } from "@tauri-apps/api/core";
+import { open as openDialog } from "@tauri-apps/plugin-dialog";
+import { readFile } from "@tauri-apps/plugin-fs";
 import {
   X,
   Loader2,
@@ -9,6 +11,7 @@ import {
   Maximize2,
   CircleHelp,
   Undo2,
+  FileUp,
 } from "lucide-react";
 import type { ExtractedImageInfo, CompressedImagePreview } from "../types";
 import {
@@ -111,6 +114,7 @@ export function ImageDetailModal({
   const [colorReduction, setColorReduction] = useState<ColorReductionMode>(defaultColorReduction);
   const [binaryThreshold, setBinaryThreshold] = useState(defaultBinaryThreshold);
   const [compressing, setCompressing] = useState(false);
+  const [replacing, setReplacing] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [fullscreen, setFullscreen] = useState(false);
 
@@ -170,6 +174,56 @@ export function ImageDetailModal({
       setCompressing(false);
     }
   }, [image, format, quality, scale, maxWidth, colorReduction, binaryThreshold, cacheDir, onCompressed]);
+
+  const handleReplace = useCallback(async () => {
+    if (!image.supported) return;
+    setReplacing(true);
+    setError(null);
+    try {
+      const selected = await openDialog({
+        multiple: false,
+        filters: [{ name: "图片", extensions: ["jpg", "jpeg", "png", "webp"] }],
+      });
+      if (!selected || typeof selected !== "string") return;
+
+      const fileData = await readFile(selected);
+      const ext = selected.toLowerCase().split(".").pop() ?? "";
+      const replaceFormat: CompressFormat =
+        ext === "png" ? "png" : ext === "webp" ? "webp" : "jpeg";
+
+      const cachedPath = await invoke<string>("write_cache_file", {
+        cacheDir,
+        filename: `img_${image.object_id.replace(/\s+/g, "_")}_replaced.${replaceFormat}`,
+        data: Array.from(fileData),
+      });
+
+      const blob = new Blob([fileData], { type: `image/${replaceFormat}` });
+      const previewUrl = URL.createObjectURL(blob);
+
+      const imgEl = new Image();
+      imgEl.src = previewUrl;
+      await new Promise<void>((resolve) => {
+        imgEl.onload = () => resolve();
+        imgEl.onerror = () => resolve();
+      });
+
+      onCompressed(image.id, {
+        object_id: image.object_id,
+        original_size: pdfImageSize(image),
+        compressed_size: fileData.byteLength,
+        temp_path: cachedPath,
+        compressed_preview_path: previewUrl,
+        format: replaceFormat,
+        width: imgEl.naturalWidth || image.width,
+        height: imgEl.naturalHeight || image.height,
+        force_replace: true,
+      });
+    } catch (e) {
+      setError(String(e));
+    } finally {
+      setReplacing(false);
+    }
+  }, [image, cacheDir, onCompressed]);
 
   return (
     <>
@@ -388,24 +442,43 @@ export function ImageDetailModal({
                   </div>
                 )}
 
-                {/* Compress button */}
-                <button
-                  onClick={handleCompress}
-                  disabled={compressing}
-                  className="w-full flex items-center justify-center gap-2 px-4 py-2.5 rounded-xl bg-blue-600 hover:bg-blue-500 transition-colors text-sm font-medium text-white disabled:opacity-50"
-                >
-                  {compressing ? (
-                    <>
-                      <Loader2 className="w-4 h-4 animate-spin" />
-                      正在压缩...
-                    </>
-                  ) : (
-                    <>
-                      <Sliders className="w-4 h-4" />
-                      {preview ? "重新压缩" : "压缩此图片"}
-                    </>
-                  )}
-                </button>
+                {/* Action buttons */}
+                <div className="flex gap-3">
+                  <button
+                    onClick={handleCompress}
+                    disabled={compressing || replacing}
+                    className="flex-1 flex items-center justify-center gap-2 px-4 py-2.5 rounded-xl bg-blue-600 hover:bg-blue-500 transition-colors text-sm font-medium text-white disabled:opacity-50"
+                  >
+                    {compressing ? (
+                      <>
+                        <Loader2 className="w-4 h-4 animate-spin" />
+                        正在压缩...
+                      </>
+                    ) : (
+                      <>
+                        <Sliders className="w-4 h-4" />
+                        {preview ? "重新压缩" : "压缩此图片"}
+                      </>
+                    )}
+                  </button>
+                  <button
+                    onClick={handleReplace}
+                    disabled={compressing || replacing}
+                    className="flex-1 flex items-center justify-center gap-2 px-4 py-2.5 rounded-xl bg-emerald-700 hover:bg-emerald-600 transition-colors text-sm font-medium text-white disabled:opacity-50"
+                  >
+                    {replacing ? (
+                      <>
+                        <Loader2 className="w-4 h-4 animate-spin" />
+                        正在替换...
+                      </>
+                    ) : (
+                      <>
+                        <FileUp className="w-4 h-4" />
+                        替换图片
+                      </>
+                    )}
+                  </button>
+                </div>
 
                 {preview && (
                   <button

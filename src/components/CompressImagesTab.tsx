@@ -512,6 +512,7 @@ export function CompressImagesTab({
           width: preview.width,
           height: preview.height,
           original_size: pdfImageSize(img),
+          force_replace: preview.force_replace ?? false,
         });
       }
 

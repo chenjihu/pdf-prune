@@ -41,6 +41,8 @@ pub struct CompressedImageEntry {
     pub width: u32,
     pub height: u32,
     pub original_size: Option<usize>,
+    #[serde(default)]
+    pub force_replace: bool,
 }
 
 #[derive(Debug, Serialize, Clone, Deserialize)]
@@ -1765,6 +1767,7 @@ struct PreparedCompressedImage {
     dict_json: Value,
     write_format: String,
     source_format: String,
+    force_replace: bool,
 }
 
 fn prepare_compressed_image_entry(
@@ -1862,6 +1865,7 @@ fn prepare_compressed_image_entry(
         dict_json,
         write_format,
         source_format: entry.format.clone(),
+        force_replace: entry.force_replace,
     })
 }
 
@@ -1912,7 +1916,7 @@ fn write_compressed_images_with_qpdf(
             }
         };
         let new_size = prepared.content.len();
-        if new_size >= prepared.original_size {
+        if !prepared.force_replace && new_size >= prepared.original_size {
             actions.push(format!(
                 "跳过 {}: 压缩后未变小 ({}B → {}B)",
                 prepared.object_id, prepared.original_size, new_size
@@ -2250,7 +2254,7 @@ pub fn write_compressed_images(
         };
 
         let new_size = candidate_content.len();
-        if new_size >= original_size_stream {
+        if !entry.force_replace && new_size >= original_size_stream {
             actions.push(format!(
                 "跳过 {}: 压缩后未变小 ({}B → {}B)",
                 entry.object_id, original_size_stream, new_size
