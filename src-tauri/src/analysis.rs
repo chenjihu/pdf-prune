@@ -1137,9 +1137,12 @@ pub fn analyze_pdf(
         Some((id, Object::Null))
     };
 
-    // Large PDFs with problematic xref streams can make lopdf extremely slow (especially in debug).
-    // For files > 50MB, use the qpdf JSON fast path which avoids loading the entire PDF with lopdf.
-    if file_size > 50_000_000 {
+    // Large PDFs with many objects or compressed xref streams can make lopdf
+    // extremely slow (especially in debug builds).  Use the qpdf JSON fast path
+    // which avoids loading the entire PDF with lopdf.
+    // Threshold lowered from 50MB to 20MB: a 44MB / 2000-page / 10k-object file
+    // was taking minutes via lopdf but only seconds via qpdf.
+    if file_size > 20_000_000 {
         return analyze_with_qpdf(path, file_size, progress_arc, cancel);
     }
 

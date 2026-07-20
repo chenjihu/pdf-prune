@@ -819,6 +819,9 @@ export function CompressImagesTab({
     const totalDots = extractProgress?.total ?? 0;
     const completedDots = Math.min(extractProgress?.completed ?? 0, totalDots);
     const activeDots = Math.min(extractProgress?.active ?? 0, Math.max(0, totalDots - completedDots));
+    const isPreviewStage = extractProgress?.msg.includes("预览") ?? false;
+    const progressTitle = isPreviewStage ? "预览生成进度" : "图片导出进度";
+    const concurrencyUnit = isPreviewStage ? "线程" : "进程";
     return (
       <div className="flex flex-col items-center justify-center min-h-[60vh]">
         <div className="flex flex-col items-center w-full max-w-2xl">
@@ -830,9 +833,9 @@ export function CompressImagesTab({
           {totalDots > 0 && (
             <div className="w-full mt-6 space-y-3">
               <div className="flex items-center justify-between text-xs text-neutral-500">
-                <span>图片提取进度</span>
+                <span>{progressTitle}</span>
                 <span className="font-mono">
-                  {completedDots}/{totalDots} · {extractProgress?.workerThreads || extractThreadCount} 线程
+                  {completedDots}/{totalDots} · {extractProgress?.workerThreads || extractThreadCount} {concurrencyUnit}
                 </span>
               </div>
               <div className="max-h-40 overflow-y-auto rounded-lg border border-neutral-800 bg-neutral-950/50 p-3">

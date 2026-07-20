@@ -4,7 +4,7 @@ use rayon::prelude::*;
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Map, Value};
 use std::collections::{HashMap, HashSet};
-use std::io::{Cursor, Read};
+use std::io::{BufRead, Cursor, Read};
 use std::path::Path;
 use std::process::Command;
 use std::sync::mpsc;
@@ -326,6 +326,19 @@ fn extract_pdfimages_num_from_path(path: &Path) -> Option<usize> {
     last.parse::<usize>().ok()
 }
 
+fn count_files_in_dir(dir: &Path, target_nums: &HashSet<usize>) -> usize {
+    std::fs::read_dir(dir)
+        .map(|entries| {
+            entries
+                .filter_map(|entry| entry.ok())
+                .filter_map(|entry| extract_pdfimages_num_from_path(&entry.path()))
+                .filter(|num| target_nums.contains(num))
+                .collect::<HashSet<_>>()
+                .len()
+        })
+        .unwrap_or(0)
+}
+
 fn extract_images_with_pdfimages(
     input_path: &str,
     worker_threads: usize,
@@ -372,35 +385,153 @@ fn extract_images_with_pdfimages(
         &format!("已快速发现 {} 张图片，正在导出...", total),
         0,
         total,
-        worker_threads.min(total),
-        worker_threads,
+        1,
+        1,
     );
 
     let output_root = temp_dir.join("pdfimages_img");
-    let export_output = Command::new(pdfimages)
+    let output_dir = output_root
+        .parent()
+        .unwrap_or(&temp_dir)
+        .to_path_buf();
+
+    let mut export_cmd = Command::new(pdfimages);
+    export_cmd
         .args(["-png", "-j", "-p", "-print-filenames", input_path])
         .arg(&output_root)
-        .output()
-        .map_err(|e| format!("pdfimages 导出失败: {}", e))?;
-    if cancel.load(Ordering::Relaxed) {
-        return Err("已取消".to_string());
-    }
-    if !export_output.status.success() {
-        return Err(format!(
-            "pdfimages 导出失败: {}",
-            String::from_utf8_lossy(&export_output.stderr).trim()
-        ));
-    }
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped());
 
-    let mut exported = HashMap::new();
-    for line in String::from_utf8_lossy(&export_output.stdout).lines() {
-        let path = Path::new(line.trim());
-        if path.exists() {
-            if let Some(num) = extract_pdfimages_num_from_path(path) {
-                exported.insert(num, path.to_path_buf());
+    let mut child = export_cmd
+        .spawn()
+        .map_err(|e| format!("pdfimages 导出失败: {}", e))?;
+
+    let stdout = child
+        .stdout
+        .take()
+        .ok_or_else(|| "无法读取 pdfimages 导出输出".to_string())?;
+    let mut stdout_handle = Some(std::thread::spawn(move || {
+        let mut exported: HashMap<usize, std::path::PathBuf> = HashMap::new();
+        for line in std::io::BufReader::new(stdout).lines() {
+            let Ok(line) = line else { continue };
+            let path = std::path::Path::new(line.trim());
+            if path.exists() {
+                if let Some(num) = extract_pdfimages_num_from_path(path) {
+                    exported.insert(num, path.to_path_buf());
+                }
             }
         }
-    }
+        exported
+    }));
+    let stderr = child
+        .stderr
+        .take()
+        .ok_or_else(|| "无法读取 pdfimages 错误输出".to_string())?;
+    let mut stderr_handle = Some(std::thread::spawn(move || {
+        let mut bytes = Vec::new();
+        let _ = std::io::BufReader::new(stderr).read_to_end(&mut bytes);
+        bytes
+    }));
+
+    // pdfimages buffers stdout when piped, so we can't rely on line-by-line
+    // reading for progress.  Instead, poll the output directory for new files.
+    let cancel_clone = cancel.clone();
+    let total_clone = total;
+
+    // Spawn a thread to count files in the output directory periodically.
+    // Use a channel to send progress counts back to the main thread, which
+    // can then call the progress callback (avoiding lifetime issues with
+    // capturing the &impl Fn in a 'static thread).
+    let (tx, rx) = std::sync::mpsc::channel::<usize>();
+    let target_nums: HashSet<usize> = rows.iter().map(|row| row.num).collect();
+    let monitor_stop = Arc::new(AtomicBool::new(false));
+    let monitor_cancel = cancel.clone();
+    let monitor_stop_clone = monitor_stop.clone();
+    let monitor_handle = std::thread::spawn(move || {
+        let mut last_count = 0usize;
+        while !monitor_stop_clone.load(Ordering::Relaxed) && !monitor_cancel.load(Ordering::Relaxed) {
+            let count = count_files_in_dir(&output_dir, &target_nums);
+            if count > last_count {
+                last_count = count;
+                let _ = tx.send(count);
+            }
+            std::thread::sleep(Duration::from_millis(200));
+        }
+    });
+
+    // Wait for pdfimages to finish while the monitor thread reports progress.
+    // Check cancel periodically.
+    let exported = loop {
+        // Drain any progress updates from the monitor thread
+        while let Ok(count) = rx.try_recv() {
+            let pct = 20 + ((count * 5) / total_clone.max(1));
+            let msg = format!("正在导出图片 ({}/{} 已导出)...", count, total_clone);
+            progress(pct.min(25) as u8, &msg);
+            detail_progress(
+                pct.min(25) as u8,
+                &msg,
+                count.min(total_clone),
+                total_clone,
+                usize::from(count < total_clone),
+                1,
+            );
+        }
+
+        match child.try_wait() {
+            Ok(Some(status)) => {
+                monitor_stop.store(true, Ordering::Relaxed);
+                let _ = monitor_handle.join();
+                let exported = stdout_handle
+                    .take()
+                    .and_then(|handle| handle.join().ok())
+                    .unwrap_or_default();
+                let stderr_output = stderr_handle
+                    .take()
+                    .and_then(|handle| handle.join().ok())
+                    .unwrap_or_default();
+
+                if !status.success() {
+                    let stderr = String::from_utf8_lossy(&stderr_output);
+                    return Err(format!(
+                        "pdfimages 导出失败，退出码: {:?}: {}",
+                        status.code(),
+                        stderr.trim()
+                    ));
+                }
+                break exported;
+            }
+            Ok(None) => {
+                // Still running
+                if cancel_clone.load(Ordering::Relaxed) {
+                    let _ = child.kill();
+                    let _ = child.wait();
+                    monitor_stop.store(true, Ordering::Relaxed);
+                    let _ = monitor_handle.join();
+                    if let Some(handle) = stdout_handle.take() {
+                        let _ = handle.join();
+                    }
+                    if let Some(handle) = stderr_handle.take() {
+                        let _ = handle.join();
+                    }
+                    return Err("已取消".to_string());
+                }
+                std::thread::sleep(Duration::from_millis(100));
+            }
+            Err(e) => {
+                let _ = child.kill();
+                let _ = child.wait();
+                monitor_stop.store(true, Ordering::Relaxed);
+                let _ = monitor_handle.join();
+                if let Some(handle) = stdout_handle.take() {
+                    let _ = handle.join();
+                }
+                if let Some(handle) = stderr_handle.take() {
+                    let _ = handle.join();
+                }
+                return Err(format!("pdfimages 导出等待失败: {}", e));
+            }
+        }
+    };
 
     progress(
         25,

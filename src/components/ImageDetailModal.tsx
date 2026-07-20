@@ -138,9 +138,17 @@ export function ImageDetailModal({
     setCompressing(true);
     setError(null);
     try {
-      const response = await fetch(convertFileSrc(image.temp_path));
+      const replacementSourcePath = preview?.force_replace
+        ? preview.replacement_source_path ?? preview.temp_path
+        : null;
+      const replacementSourceFormat = preview?.force_replace
+        ? preview.replacement_source_format ?? preview.format
+        : null;
+      const sourcePath = replacementSourcePath ?? image.temp_path;
+      const sourceFormat = replacementSourceFormat ?? image.format;
+      const response = await fetch(convertFileSrc(sourcePath));
       const arrayBuffer = await response.arrayBuffer();
-      const result = await compressImage(arrayBuffer, image.format, {
+      const result = await compressImage(arrayBuffer, sourceFormat, {
         format,
         quality,
         scale: scale / 100,
@@ -167,13 +175,16 @@ export function ImageDetailModal({
         format,
         width: result.width,
         height: result.height,
+        force_replace: preview?.force_replace ?? false,
+        replacement_source_path: replacementSourcePath ?? undefined,
+        replacement_source_format: replacementSourceFormat ?? undefined,
       });
     } catch (e) {
       setError(String(e));
     } finally {
       setCompressing(false);
     }
-  }, [image, format, quality, scale, maxWidth, colorReduction, binaryThreshold, cacheDir, onCompressed]);
+  }, [image, preview, format, quality, scale, maxWidth, colorReduction, binaryThreshold, cacheDir, onCompressed]);
 
   const handleReplace = useCallback(async () => {
     if (!image.supported) return;
@@ -217,6 +228,8 @@ export function ImageDetailModal({
         width: imgEl.naturalWidth || image.width,
         height: imgEl.naturalHeight || image.height,
         force_replace: true,
+        replacement_source_path: cachedPath,
+        replacement_source_format: replaceFormat,
       });
     } catch (e) {
       setError(String(e));

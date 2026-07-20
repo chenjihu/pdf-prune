@@ -195,4 +195,6 @@ export interface CompressedImagePreview {
   width: number;
   height: number;
   force_replace?: boolean;
+  replacement_source_path?: string;
+  replacement_source_format?: string;
 }
